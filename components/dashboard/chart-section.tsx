@@ -2,13 +2,36 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useTrading } from '@/lib/trading-context'
-import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, TimeScale, Filler } from 'chart.js'
-import { Chart } from 'react-chartjs-2'
-import type { TooltipItem } from 'chart.js'
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+  TimeScale,
+  Filler,
+} from 'chart.js'
+import { Bar } from 'react-chartjs-2'
+import type { TooltipItem, ChartData, ChartOptions } from 'chart.js'
 import 'chartjs-adapter-date-fns'
 
 // Registar componentes do Chart.js
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, TimeScale, Filler)
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+  TimeScale,
+  Filler
+)
 
 // Ícone de gráfico de barras customizado
 function BarChartIcon({ active }: { active: boolean }) {
@@ -52,7 +75,7 @@ export function ChartSection() {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false)
   const [candleData, setCandleData] = useState<CandleData[]>([])
   const [displayDigit, setDisplayDigit] = useState(2)
-  const chartRef = useRef<ChartJS | null>(null)
+  const chartRef = useRef<ChartJS<'bar'> | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const tickOptions = [25, 50, 100, 250, 500, 1000]
@@ -92,15 +115,15 @@ export function ChartSection() {
   const generateMockCandles = useCallback((): CandleData[] => {
     const now = Date.now()
     const candles: CandleData[] = []
-    let price = 950.00
-    
+    let price = 950.0
+
     for (let i = 0; i < 60; i++) {
       const open = price
       const change = (Math.random() - 0.5) * 2
       const close = open + change
       const high = Math.max(open, close) + Math.random() * 0.5
       const low = Math.min(open, close) - Math.random() * 0.5
-      
+
       candles.push({
         x: now - (60 - i) * 60000,
         o: open,
@@ -108,10 +131,10 @@ export function ChartSection() {
         l: low,
         c: close,
       })
-      
+
       price = close
     }
-    
+
     return candles
   }, [])
 
@@ -125,129 +148,66 @@ export function ChartSection() {
   // Encontrar último dígito mais frequente para barras
   const highlightedDigit = barData.find(d => d.isHighlight)?.digit ?? displayDigit
 
-  // Configuração do gráfico de candlestick
-  const candlestickConfig = {
-    type: 'bar' as const,
-    data: {
-      labels: candleData.map(c => new Date(c.x).toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' })),
-      datasets: [
-        {
-          label: 'Candlestick',
-          data: candleData.map(c => ({
-            x: c.x,
-            y: [c.o, c.h, c.l, c.c],
-          })),
-          backgroundColor: candleData.map(c => c.c >= c.o ? 'rgba(34, 197, 94, 0.8)' : 'rgba(220, 38, 38, 0.8)'),
-          borderColor: candleData.map(c => c.c >= c.o ? '#22c55e' : '#dc2626'),
-          borderWidth: 1,
-          barThickness: 8,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#1a1f2e',
-          titleColor: '#fff',
-          bodyColor: '#9ca3af',
-          borderColor: '#374151',
-          borderWidth: 1,
-          callbacks: {
-            label: (context: TooltipItem<'bar'>) => {
-              const data = context.raw as { y?: number[] }
-              if (data?.y) {
-                const [o, h, l, c] = data.y
-                return [
-                  `Open: ${o?.toFixed(2)}`,
-                  `High: ${h?.toFixed(2)}`,
-                  `Low: ${l?.toFixed(2)}`,
-                  `Close: ${c?.toFixed(2)}`,
-                ]
-              }
-              return ''
-            },
+  // Dados e opções do gráfico de barras — tipados explicitamente
+  const barChartData: ChartData<'bar'> = {
+    labels: barData.map(b => b.digit.toString()),
+    datasets: [
+      {
+        label: 'Percentual',
+        data: barData.map(b => b.percentage),
+        backgroundColor: barData.map(b =>
+          b.isHighlight ? '#22c55e' : b.isLow ? '#dc2626' : '#d1d5db'
+        ),
+        borderRadius: 4,
+        barThickness: 32,
+      },
+    ],
+  }
+
+  const barChartOptions: ChartOptions<'bar'> = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: '#1a1f2e',
+        titleColor: '#fff',
+        bodyColor: '#9ca3af',
+        callbacks: {
+          label: (context: TooltipItem<'bar'>) => {
+            const value = context.parsed.y ?? 0
+            return `${value.toFixed(1)}%`
           },
         },
       },
-      scales: {
-        x: {
-          grid: { color: '#2a3142' },
-          ticks: { color: '#9ca3af', maxTicksLimit: 10 },
+    },
+    scales: {
+      x: {
+        grid: { display: false },
+        ticks: {
+          color: '#fff',
+          font: { weight: 'bold', size: 14 },
         },
-        y: {
-          grid: { color: '#2a3142' },
-          ticks: { color: '#9ca3af' },
-          position: 'left' as const,
+      },
+      y: {
+        grid: { color: '#2a3142' },
+        ticks: {
+          color: '#9ca3af',
+          callback: (value: number | string) => `${value}%`,
         },
+        max: 35,
       },
     },
   }
 
-  // Configuração do gráfico de barras (percentual de dígitos)
-  const barChartConfig = {
-    type: 'bar' as const,
-    data: {
-      labels: barData.map(b => b.digit.toString()),
-      datasets: [
-        {
-          label: 'Percentual',
-          data: barData.map(b => b.percentage),
-          backgroundColor: barData.map(b => 
-            b.isHighlight ? '#22c55e' : b.isLow ? '#dc2626' : '#d1d5db'
-          ),
-          borderRadius: 4,
-          barThickness: 32,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#1a1f2e',
-          titleColor: '#fff',
-          bodyColor: '#9ca3af',
-          callbacks: {
-            label: (context: TooltipItem<'bar'>) => {
-              const value = context.parsed.y ?? 0
-              return `${value.toFixed(1)}%`
-            },
-          },
-        },
-      },
-      scales: {
-        x: {
-          grid: { display: false },
-          ticks: { 
-            color: '#fff', 
-            font: { weight: 'bold' as const, size: 14 } 
-          },
-        },
-        y: {
-          grid: { color: '#2a3142' },
-          ticks: { 
-            color: '#9ca3af',
-            callback: (value: number | string) => `${value}%`,
-          },
-          max: 35,
-        },
-      },
-    },
-  }
-
-  // Renderizar candlestick customizado
+  // Renderizar candlestick customizado via SVG
   const renderCandlestick = () => {
     const chartHeight = 220
     const chartWidth = containerRef.current?.clientWidth || 600
     const padding = { top: 15, right: 15, bottom: 35, left: 50 }
     const plotWidth = chartWidth - padding.left - padding.right
     const plotHeight = chartHeight - padding.top - padding.bottom
-    
+
     if (candleData.length === 0) return null
 
     const allPrices = candleData.flatMap(c => [c.h, c.l])
@@ -255,48 +215,98 @@ export function ChartSection() {
     const yMax = Math.max(...allPrices) + 0.5
     const yRange = yMax - yMin || 1
 
-    const candleWidth = Math.max(4, (plotWidth / candleData.length) - 2)
+    const candleWidth = Math.max(4, plotWidth / candleData.length - 2)
 
     return (
-      <svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="xMidYMid meet">
+      <svg
+        width="100%"
+        height={chartHeight}
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+        preserveAspectRatio="xMidYMid meet"
+      >
         {[0, 0.25, 0.5, 0.75, 1].map((pct, idx) => {
           const value = yMin + pct * yRange
           const y = padding.top + plotHeight - pct * plotHeight
           return (
             <g key={idx}>
-              <line x1={padding.left} y1={y} x2={chartWidth - padding.right} y2={y} stroke="#2a3142" strokeWidth="1" strokeDasharray="2,2" />
-              <text x={padding.left - 8} y={y + 4} textAnchor="end" fill="#9ca3af" fontSize="10">{value.toFixed(2)}</text>
+              <line
+                x1={padding.left}
+                y1={y}
+                x2={chartWidth - padding.right}
+                y2={y}
+                stroke="#2a3142"
+                strokeWidth="1"
+                strokeDasharray="2,2"
+              />
+              <text
+                x={padding.left - 8}
+                y={y + 4}
+                textAnchor="end"
+                fill="#9ca3af"
+                fontSize="10"
+              >
+                {value.toFixed(2)}
+              </text>
             </g>
           )
         })}
 
         {candleData.map((candle, idx) => {
-          const x = padding.left + (idx / candleData.length) * plotWidth + candleWidth / 2
+          const x =
+            padding.left + (idx / candleData.length) * plotWidth + candleWidth / 2
           const isBullish = candle.c >= candle.o
           const color = isBullish ? '#22c55e' : '#dc2626'
-          const yHigh = padding.top + plotHeight - ((candle.h - yMin) / yRange) * plotHeight
-          const yLow = padding.top + plotHeight - ((candle.l - yMin) / yRange) * plotHeight
-          const yOpen = padding.top + plotHeight - ((candle.o - yMin) / yRange) * plotHeight
-          const yClose = padding.top + plotHeight - ((candle.c - yMin) / yRange) * plotHeight
+          const yHigh =
+            padding.top + plotHeight - ((candle.h - yMin) / yRange) * plotHeight
+          const yLow =
+            padding.top + plotHeight - ((candle.l - yMin) / yRange) * plotHeight
+          const yOpen =
+            padding.top + plotHeight - ((candle.o - yMin) / yRange) * plotHeight
+          const yClose =
+            padding.top + plotHeight - ((candle.c - yMin) / yRange) * plotHeight
           const bodyTop = Math.min(yOpen, yClose)
           const bodyHeight = Math.max(1, Math.abs(yClose - yOpen))
 
           return (
             <g key={idx}>
               <line x1={x} y1={yHigh} x2={x} y2={yLow} stroke={color} strokeWidth="1" />
-              <rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" />
+              <rect
+                x={x - candleWidth / 2}
+                y={bodyTop}
+                width={candleWidth}
+                height={bodyHeight}
+                fill={color}
+                rx="1"
+              />
             </g>
           )
         })}
 
-        {candleData.filter((_, i) => i % Math.ceil(candleData.length / 8) === 0).map((candle, idx) => {
-          const actualIdx = candleData.indexOf(candle)
-          const x = padding.left + (actualIdx / candleData.length) * plotWidth + candleWidth / 2
-          const time = new Date(candle.x).toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' })
-          return (
-            <text key={idx} x={x} y={chartHeight - 10} textAnchor="middle" fill="#9ca3af" fontSize="9">{time}</text>
-          )
-        })}
+        {candleData
+          .filter((_, i) => i % Math.ceil(candleData.length / 8) === 0)
+          .map((candle, idx) => {
+            const actualIdx = candleData.indexOf(candle)
+            const x =
+              padding.left +
+              (actualIdx / candleData.length) * plotWidth +
+              candleWidth / 2
+            const time = new Date(candle.x).toLocaleTimeString('pt-PT', {
+              hour: '2-digit',
+              minute: '2-digit',
+            })
+            return (
+              <text
+                key={idx}
+                x={x}
+                y={chartHeight - 10}
+                textAnchor="middle"
+                fill="#9ca3af"
+                fontSize="9"
+              >
+                {time}
+              </text>
+            )
+          })}
       </svg>
     )
   }
@@ -307,13 +317,21 @@ export function ChartSection() {
         <div className="flex items-center gap-1">
           <button
             onClick={() => setActiveChart('bar')}
-            className={`p-2 rounded-lg transition-all duration-200 ${activeChart === 'bar' ? 'bg-white shadow-md' : 'bg-transparent hover:bg-[#374151]'}`}
+            className={`p-2 rounded-lg transition-all duration-200 ${
+              activeChart === 'bar'
+                ? 'bg-white shadow-md'
+                : 'bg-transparent hover:bg-[#374151]'
+            }`}
           >
             <BarChartIcon active={activeChart === 'bar'} />
           </button>
           <button
             onClick={() => setActiveChart('candle')}
-            className={`p-2 rounded-lg transition-all duration-200 ${activeChart === 'candle' ? 'bg-white shadow-md' : 'bg-transparent hover:bg-[#374151]'}`}
+            className={`p-2 rounded-lg transition-all duration-200 ${
+              activeChart === 'candle'
+                ? 'bg-white shadow-md'
+                : 'bg-transparent hover:bg-[#374151]'
+            }`}
           >
             <CandleChartIcon active={activeChart === 'candle'} />
           </button>
@@ -321,9 +339,10 @@ export function ChartSection() {
 
         <div className="flex items-center gap-3 sm:gap-6">
           <span className="text-white font-medium text-sm sm:text-base">
-            Last Digits: <span className="font-bold text-[#22d3ee]">{highlightedDigit}</span>
+            Last Digits:{' '}
+            <span className="font-bold text-[#22d3ee]">{highlightedDigit}</span>
           </span>
-          
+
           <div className="relative">
             <button
               onClick={() => setIsDropdownOpen(!isDropdownOpen)}
@@ -331,25 +350,51 @@ export function ChartSection() {
             >
               <span>{selectedTicks} ticks</span>
               <div className="flex flex-col items-center">
-                <svg width="8" height="5" viewBox="0 0 10 6" fill="none" className="-mb-0.5">
-                  <path d="M1 5L5 1L9 5" stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                <svg
+                  width="8"
+                  height="5"
+                  viewBox="0 0 10 6"
+                  fill="none"
+                  className="-mb-0.5"
+                >
+                  <path
+                    d="M1 5L5 1L9 5"
+                    stroke="#9ca3af"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
                 </svg>
-                <svg width="8" height="5" viewBox="0 0 10 6" fill="none" className="-mt-0.5">
-                  <path d="M1 1L5 5L9 1" stroke="#9ca3af" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                <svg
+                  width="8"
+                  height="5"
+                  viewBox="0 0 10 6"
+                  fill="none"
+                  className="-mt-0.5"
+                >
+                  <path
+                    d="M1 1L5 5L9 1"
+                    stroke="#9ca3af"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
                 </svg>
               </div>
             </button>
-            
+
             {isDropdownOpen && (
               <div className="absolute right-0 top-full mt-2 bg-[#2a3142] rounded-lg shadow-xl border-2 border-[#374151] py-1 z-50 min-w-[100px]">
-                {tickOptions.map((tick) => (
+                {tickOptions.map(tick => (
                   <button
                     key={tick}
                     onClick={() => {
                       setSelectedTicks(tick)
                       setIsDropdownOpen(false)
                     }}
-                    className={`w-full px-4 py-2 text-left text-sm hover:bg-[#374151] transition-colors ${selectedTicks === tick ? 'text-[#22d3ee]' : 'text-white'}`}
+                    className={`w-full px-4 py-2 text-left text-sm hover:bg-[#374151] transition-colors ${
+                      selectedTicks === tick ? 'text-[#22d3ee]' : 'text-white'
+                    }`}
                   >
                     {tick} ticks
                   </button>
@@ -362,16 +407,13 @@ export function ChartSection() {
 
       <div ref={containerRef} className="relative h-[220px]">
         {activeChart === 'bar' ? (
-          <Chart
+          <Bar
             ref={chartRef}
-            type="bar"
-            data={barChartConfig.data}
-            options={barChartConfig.options}
+            data={barChartData}
+            options={barChartOptions}
           />
         ) : (
-          <div className="w-full h-full">
-            {renderCandlestick()}
-          </div>
+          <div className="w-full h-full">{renderCandlestick()}</div>
         )}
       </div>
 
