@@ -4,62 +4,35 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useLoader } from '@/components/loader'
 
-// Deriv OAuth2 Configuration
 const CLIENT_ID = process.env.NEXT_PUBLIC_DERIV_CLIENT_ID || '3356rGdzrsnQaEKsg8MMA'
-const REDIRECT_URI = process.env.NEXT_PUBLIC_DERIV_REDIRECT_URI || (typeof window !== 'undefined' ? `${window.location.origin}/callback` : 'https://localhost:3000/callback')
+const REDIRECT_URI = process.env.NEXT_PUBLIC_DERIV_REDIRECT_URI || 'https://banckend-production-14a1.up.railway.app/api/auth/callback'
 const AUTH_URL = 'https://auth.deriv.com/oauth2/auth'
-
-// Affiliate parameters
 const AFFILIATE_TOKEN = 'hCp-xUFsKsktJe5FDKcTD2Nd7ZgqdRLk'
 const UTM_CAMPAIGN = 'NEXORA'
 
-/**
- * Generate PKCE (Proof Key for Code Exchange) parameters
- * Following Deriv OAuth2 documentation
- */
-async function generatePKCE(): Promise<{ codeVerifier: string; codeChallenge: string; state: string }> {
-  // 1. Generate a random code_verifier (43-128 characters)
+async function generatePKCE(): Promise<{ codeChallenge: string; state: string }> {
   const array = new Uint8Array(64)
   crypto.getRandomValues(array)
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
-  const codeVerifier = Array.from(array)
-    .map(v => chars[v % chars.length])
-    .join('')
+  const codeVerifier = Array.from(array).map(v => chars[v % chars.length]).join('')
 
-  // 2. Derive the code_challenge = BASE64URL(SHA256(code_verifier))
   const encoder = new TextEncoder()
-  const data = encoder.encode(codeVerifier)
-  const digest = await crypto.subtle.digest('SHA-256', data)
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(codeVerifier))
   const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 
-  // 3. Generate a random state for CSRF protection
   const stateArray = new Uint8Array(16)
   crypto.getRandomValues(stateArray)
-  const state = Array.from(stateArray)
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('')
+  const state = Array.from(stateArray).map(b => b.toString(16).padStart(2, '0')).join('')
 
-  // 4. Store before redirecting (sessionStorage survives the redirect)
   sessionStorage.setItem('pkce_code_verifier', codeVerifier)
   sessionStorage.setItem('oauth_state', state)
 
-  return { codeVerifier, codeChallenge, state }
+  return { codeChallenge, state }
 }
 
-/**
- * Build the OAuth2 authorization URL
- */
-function buildAuthUrl(params: {
-  codeChallenge: string
-  state: string
-  isRegistration?: boolean
-}): string {
+function buildAuthUrl(params: { codeChallenge: string; state: string; isRegistration?: boolean }): string {
   const url = new URL(AUTH_URL)
-  
-  // Required parameters
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('client_id', CLIENT_ID)
   url.searchParams.set('redirect_uri', REDIRECT_URI)
@@ -67,17 +40,10 @@ function buildAuthUrl(params: {
   url.searchParams.set('state', params.state)
   url.searchParams.set('code_challenge', params.codeChallenge)
   url.searchParams.set('code_challenge_method', 'S256')
-  
-  // Registration prompt
-  if (params.isRegistration) {
-    url.searchParams.set('prompt', 'registration')
-  }
-  
-  // Affiliate tracking
+  if (params.isRegistration) url.searchParams.set('prompt', 'registration')
   url.searchParams.set('utm_campaign', UTM_CAMPAIGN)
   url.searchParams.set('utm_medium', 'affiliate')
   url.searchParams.set('utm_source', AFFILIATE_TOKEN)
-  
   return url.toString()
 }
 
@@ -88,7 +54,6 @@ export default function LoginPage() {
   const [isChecking, setIsChecking] = useState(true)
 
   useEffect(() => {
-    // Check if already authenticated
     const token = localStorage.getItem('token')
     if (token) {
       show('A carregar...')
@@ -101,26 +66,22 @@ export default function LoginPage() {
   const handleLogin = async () => {
     setIsLoading(true)
     show('A redirecionar para Deriv...')
-    
     try {
       const { codeChallenge, state } = await generatePKCE()
-      const authUrl = buildAuthUrl({ codeChallenge, state, isRegistration: false })
-      window.location.href = authUrl
+      window.location.href = buildAuthUrl({ codeChallenge, state, isRegistration: false })
     } catch (err) {
-      console.error('[Login] Error generating PKCE:', err)
+      console.error('[Login] PKCE error:', err)
       setIsLoading(false)
     }
   }
 
   const handleRegister = async () => {
     show('A redirecionar para registo...')
-    
     try {
       const { codeChallenge, state } = await generatePKCE()
-      const authUrl = buildAuthUrl({ codeChallenge, state, isRegistration: true })
-      window.location.href = authUrl
+      window.location.href = buildAuthUrl({ codeChallenge, state, isRegistration: true })
     } catch (err) {
-      console.error('[Login] Error generating PKCE for registration:', err)
+      console.error('[Login] PKCE error:', err)
     }
   }
 
@@ -135,11 +96,10 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen min-h-dvh flex items-center justify-center bg-[#0a0e1a] p-4">
       <div className="w-full max-w-[380px] bg-[#0d1117] rounded-2xl border border-[#1a1f2e] p-8 shadow-2xl">
-        {/* Logo */}
         <div className="text-center mb-8">
-          <h1 
+          <h1
             className="text-3xl font-black tracking-[4px] mb-2"
-            style={{ 
+            style={{
               fontFamily: 'Orbitron, system-ui, sans-serif',
               background: 'linear-gradient(135deg, #fff, #2ec7ff, #fff)',
               WebkitBackgroundClip: 'text',
@@ -172,7 +132,6 @@ export default function LoginPage() {
           {isLoading ? 'A carregar...' : 'Entrar com Deriv'}
         </button>
 
-        {/* Separator */}
         <div className="flex items-center gap-4 my-6">
           <span className="flex-1 h-px bg-[#1a1f2e]" />
           <p className="text-gray-500 text-xs">Não tem conta?</p>
@@ -188,7 +147,6 @@ export default function LoginPage() {
           </button>
         </div>
 
-        {/* Footer */}
         <div className="mt-8 pt-6 border-t border-[#1a1f2e] text-center">
           <p className="text-gray-600 text-xs mb-2">
             © 2026 Nexora Forex · Powered by Deriv API
