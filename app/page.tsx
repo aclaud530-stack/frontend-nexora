@@ -4,48 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useLoader } from '@/components/loader'
 
-const CLIENT_ID = process.env.NEXT_PUBLIC_DERIV_CLIENT_ID || '3356rGdzrsnQaEKsg8MMA'
-const REDIRECT_URI = process.env.NEXT_PUBLIC_DERIV_REDIRECT_URI || 'https://banckend-production-14a1.up.railway.app/api/auth/callback'
-const AUTH_URL = 'https://auth.deriv.com/oauth2/auth'
-const AFFILIATE_TOKEN = 'hCp-xUFsKsktJe5FDKcTD2Nd7ZgqdRLk'
-const UTM_CAMPAIGN = 'NEXORA'
-
-async function generatePKCE(): Promise<{ codeChallenge: string; state: string }> {
-  const array = new Uint8Array(64)
-  crypto.getRandomValues(array)
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
-  const codeVerifier = Array.from(array).map(v => chars[v % chars.length]).join('')
-
-  const encoder = new TextEncoder()
-  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(codeVerifier))
-  const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-
-  const stateArray = new Uint8Array(16)
-  crypto.getRandomValues(stateArray)
-  const state = Array.from(stateArray).map(b => b.toString(16).padStart(2, '0')).join('')
-
-  sessionStorage.setItem('pkce_code_verifier', codeVerifier)
-  sessionStorage.setItem('oauth_state', state)
-
-  return { codeChallenge, state }
-}
-
-function buildAuthUrl(params: { codeChallenge: string; state: string; isRegistration?: boolean }): string {
-  const url = new URL(AUTH_URL)
-  url.searchParams.set('response_type', 'code')
-  url.searchParams.set('client_id', CLIENT_ID)
-  url.searchParams.set('redirect_uri', REDIRECT_URI)
-  url.searchParams.set('scope', 'trade')
-  url.searchParams.set('state', params.state)
-  url.searchParams.set('code_challenge', params.codeChallenge)
-  url.searchParams.set('code_challenge_method', 'S256')
-  if (params.isRegistration) url.searchParams.set('prompt', 'registration')
-  url.searchParams.set('utm_campaign', UTM_CAMPAIGN)
-  url.searchParams.set('utm_medium', 'affiliate')
-  url.searchParams.set('utm_source', AFFILIATE_TOKEN)
-  return url.toString()
-}
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://banckend-production-14a1.up.railway.app'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -67,10 +26,11 @@ export default function LoginPage() {
     setIsLoading(true)
     show('A redirecionar para Deriv...')
     try {
-      const { codeChallenge, state } = await generatePKCE()
-      window.location.href = buildAuthUrl({ codeChallenge, state, isRegistration: false })
+      const res = await fetch(`${API_URL}/api/auth/login`)
+      const { authUrl } = await res.json()
+      window.location.href = authUrl
     } catch (err) {
-      console.error('[Login] PKCE error:', err)
+      console.error('[Login] error:', err)
       setIsLoading(false)
     }
   }
@@ -78,10 +38,11 @@ export default function LoginPage() {
   const handleRegister = async () => {
     show('A redirecionar para registo...')
     try {
-      const { codeChallenge, state } = await generatePKCE()
-      window.location.href = buildAuthUrl({ codeChallenge, state, isRegistration: true })
+      const res = await fetch(`${API_URL}/api/auth/login?prompt=registration`)
+      const { authUrl } = await res.json()
+      window.location.href = authUrl
     } catch (err) {
-      console.error('[Login] PKCE error:', err)
+      console.error('[Register] error:', err)
     }
   }
 
