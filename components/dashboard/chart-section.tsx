@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useTrading } from '@/lib/trading-context'
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, TimeScale, Filler } from 'chart.js'
 import { Chart } from 'react-chartjs-2'
+import type { TooltipItem } from 'chart.js'
 import 'chartjs-adapter-date-fns'
 
 // Registar componentes do Chart.js
@@ -155,7 +156,7 @@ export function ChartSection() {
           borderColor: '#374151',
           borderWidth: 1,
           callbacks: {
-            label: (context: { raw: { y?: number[] } }) => {
+            label: (context: TooltipItem<'bar'>) => {
               const data = context.raw as { y?: number[] }
               if (data?.y) {
                 const [o, h, l, c] = data.y
@@ -173,11 +174,11 @@ export function ChartSection() {
       },
       scales: {
         x: {
-          grid: { color: '#2a3142', drawBorder: false },
+          grid: { color: '#2a3142' },
           ticks: { color: '#9ca3af', maxTicksLimit: 10 },
         },
         y: {
-          grid: { color: '#2a3142', drawBorder: false },
+          grid: { color: '#2a3142' },
           ticks: { color: '#9ca3af' },
           position: 'left' as const,
         },
@@ -212,7 +213,10 @@ export function ChartSection() {
           titleColor: '#fff',
           bodyColor: '#9ca3af',
           callbacks: {
-            label: (context: { parsed: { y: number } }) => `${context.parsed.y.toFixed(1)}%`,
+            label: (context: TooltipItem<'bar'>) => {
+              const value = context.parsed.y ?? 0
+              return `${value.toFixed(1)}%`
+            },
           },
         },
       },
@@ -225,7 +229,7 @@ export function ChartSection() {
           },
         },
         y: {
-          grid: { color: '#2a3142', drawBorder: false },
+          grid: { color: '#2a3142' },
           ticks: { 
             color: '#9ca3af',
             callback: (value: number | string) => `${value}%`,
@@ -246,7 +250,6 @@ export function ChartSection() {
     
     if (candleData.length === 0) return null
 
-    // Calcular escala Y
     const allPrices = candleData.flatMap(c => [c.h, c.l])
     const yMin = Math.min(...allPrices) - 0.5
     const yMax = Math.max(...allPrices) + 0.5
@@ -256,88 +259,42 @@ export function ChartSection() {
 
     return (
       <svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="xMidYMid meet">
-        {/* Grid horizontal */}
         {[0, 0.25, 0.5, 0.75, 1].map((pct, idx) => {
           const value = yMin + pct * yRange
           const y = padding.top + plotHeight - pct * plotHeight
           return (
             <g key={idx}>
-              <line
-                x1={padding.left}
-                y1={y}
-                x2={chartWidth - padding.right}
-                y2={y}
-                stroke="#2a3142"
-                strokeWidth="1"
-                strokeDasharray="2,2"
-              />
-              <text
-                x={padding.left - 8}
-                y={y + 4}
-                textAnchor="end"
-                fill="#9ca3af"
-                fontSize="10"
-              >
-                {value.toFixed(2)}
-              </text>
+              <line x1={padding.left} y1={y} x2={chartWidth - padding.right} y2={y} stroke="#2a3142" strokeWidth="1" strokeDasharray="2,2" />
+              <text x={padding.left - 8} y={y + 4} textAnchor="end" fill="#9ca3af" fontSize="10">{value.toFixed(2)}</text>
             </g>
           )
         })}
 
-        {/* Candlesticks */}
         {candleData.map((candle, idx) => {
           const x = padding.left + (idx / candleData.length) * plotWidth + candleWidth / 2
           const isBullish = candle.c >= candle.o
           const color = isBullish ? '#22c55e' : '#dc2626'
-          
           const yHigh = padding.top + plotHeight - ((candle.h - yMin) / yRange) * plotHeight
           const yLow = padding.top + plotHeight - ((candle.l - yMin) / yRange) * plotHeight
           const yOpen = padding.top + plotHeight - ((candle.o - yMin) / yRange) * plotHeight
           const yClose = padding.top + plotHeight - ((candle.c - yMin) / yRange) * plotHeight
-          
           const bodyTop = Math.min(yOpen, yClose)
           const bodyHeight = Math.max(1, Math.abs(yClose - yOpen))
 
           return (
             <g key={idx}>
-              {/* Wick (sombra) */}
-              <line
-                x1={x}
-                y1={yHigh}
-                x2={x}
-                y2={yLow}
-                stroke={color}
-                strokeWidth="1"
-              />
-              {/* Body (corpo) */}
-              <rect
-                x={x - candleWidth / 2}
-                y={bodyTop}
-                width={candleWidth}
-                height={bodyHeight}
-                fill={color}
-                rx="1"
-              />
+              <line x1={x} y1={yHigh} x2={x} y2={yLow} stroke={color} strokeWidth="1" />
+              <rect x={x - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} fill={color} rx="1" />
             </g>
           )
         })}
 
-        {/* Eixo X - timestamps */}
         {candleData.filter((_, i) => i % Math.ceil(candleData.length / 8) === 0).map((candle, idx) => {
           const actualIdx = candleData.indexOf(candle)
           const x = padding.left + (actualIdx / candleData.length) * plotWidth + candleWidth / 2
           const time = new Date(candle.x).toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' })
           return (
-            <text
-              key={idx}
-              x={x}
-              y={chartHeight - 10}
-              textAnchor="middle"
-              fill="#9ca3af"
-              fontSize="9"
-            >
-              {time}
-            </text>
+            <text key={idx} x={x} y={chartHeight - 10} textAnchor="middle" fill="#9ca3af" fontSize="9">{time}</text>
           )
         })}
       </svg>
@@ -346,39 +303,27 @@ export function ChartSection() {
 
   return (
     <div className="bg-[#1a1f2e] rounded-xl p-3 sm:p-4 border-2 border-[#2a3142] shadow-lg">
-      {/* Header do gráfico */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-1">
-          {/* Botões de tipo de gráfico */}
           <button
             onClick={() => setActiveChart('bar')}
-            className={`p-2 rounded-lg transition-all duration-200 ${
-              activeChart === 'bar' 
-                ? 'bg-white shadow-md' 
-                : 'bg-transparent hover:bg-[#374151]'
-            }`}
+            className={`p-2 rounded-lg transition-all duration-200 ${activeChart === 'bar' ? 'bg-white shadow-md' : 'bg-transparent hover:bg-[#374151]'}`}
           >
             <BarChartIcon active={activeChart === 'bar'} />
           </button>
           <button
             onClick={() => setActiveChart('candle')}
-            className={`p-2 rounded-lg transition-all duration-200 ${
-              activeChart === 'candle' 
-                ? 'bg-white shadow-md' 
-                : 'bg-transparent hover:bg-[#374151]'
-            }`}
+            className={`p-2 rounded-lg transition-all duration-200 ${activeChart === 'candle' ? 'bg-white shadow-md' : 'bg-transparent hover:bg-[#374151]'}`}
           >
             <CandleChartIcon active={activeChart === 'candle'} />
           </button>
         </div>
 
-        {/* Título e seletor de ticks */}
         <div className="flex items-center gap-3 sm:gap-6">
           <span className="text-white font-medium text-sm sm:text-base">
             Last Digits: <span className="font-bold text-[#22d3ee]">{highlightedDigit}</span>
           </span>
           
-          {/* Dropdown de ticks */}
           <div className="relative">
             <button
               onClick={() => setIsDropdownOpen(!isDropdownOpen)}
@@ -404,9 +349,7 @@ export function ChartSection() {
                       setSelectedTicks(tick)
                       setIsDropdownOpen(false)
                     }}
-                    className={`w-full px-4 py-2 text-left text-sm hover:bg-[#374151] transition-colors ${
-                      selectedTicks === tick ? 'text-[#22d3ee]' : 'text-white'
-                    }`}
+                    className={`w-full px-4 py-2 text-left text-sm hover:bg-[#374151] transition-colors ${selectedTicks === tick ? 'text-[#22d3ee]' : 'text-white'}`}
                   >
                     {tick} ticks
                   </button>
@@ -417,10 +360,8 @@ export function ChartSection() {
         </div>
       </div>
 
-      {/* Área do gráfico */}
       <div ref={containerRef} className="relative h-[220px]">
         {activeChart === 'bar' ? (
-          // Gráfico de Barras com Chart.js
           <Chart
             ref={chartRef}
             type="bar"
@@ -428,14 +369,12 @@ export function ChartSection() {
             options={barChartConfig.options}
           />
         ) : (
-          // Gráfico de Candlestick customizado
           <div className="w-full h-full">
             {renderCandlestick()}
           </div>
         )}
       </div>
 
-      {/* Indicador de último dígito */}
       <div className="mt-3 flex items-center justify-center">
         <div className="bg-[#0a0e1a] rounded-lg px-4 py-2 border border-[#2a3142]">
           <span className="text-gray-400 text-xs mr-2">Último dígito:</span>
