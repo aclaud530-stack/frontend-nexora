@@ -29,9 +29,18 @@ import {
 
 const WHATSAPP = '976289984'
 
+const ONLINE_DELTAS = [4, 6, 8, 1, 9]
+let deltaIndex = 0
+
 function generateOnlineCount() {
   const base = 4890899
   return base + Math.floor(Math.random() * 50000)
+}
+
+function nextDelta(): number {
+  const delta = ONLINE_DELTAS[deltaIndex % ONLINE_DELTAS.length]
+  deltaIndex++
+  return delta
 }
 
 const LOCAL_AVISOS = [
@@ -92,8 +101,10 @@ export default function MenuPage() {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setOnlineCount(generateOnlineCount())
-    }, 7 * 60 * 1000)
+      const delta = nextDelta()
+      const sign = Math.random() > 0.4 ? 1 : -1
+      setOnlineCount(prev => prev + sign * delta)
+    }, 60 * 1000)
     return () => clearInterval(interval)
   }, [])
 
@@ -209,13 +220,22 @@ export default function MenuPage() {
         {/* Online Count */}
         <div className="flex items-center justify-between px-4 py-3 bg-[#0d1117] rounded-xl mb-4">
           <div className="flex items-center gap-2">
-            <Globe size={15} className="text-gray-500" />
+            <Globe
+              size={15}
+              className="text-[#22c55e]"
+              style={{ animation: 'spin 3s linear infinite' }}
+            />
             <span className="text-gray-400 text-sm">ONLINES</span>
+            <span className="flex items-center gap-1 px-1.5 py-0.5 bg-[#22c55e]/10 rounded-full">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] animate-pulse" />
+              <span className="text-[#22c55e] text-[10px] font-semibold tracking-wide">AO VIVO</span>
+            </span>
           </div>
-          <span className="text-[#2ec7ff] font-bold tabular-nums">
+          <span className="text-[#22c55e] font-bold tabular-nums">
             {onlineCount.toLocaleString('pt-PT')}
           </span>
         </div>
+        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
 
         <div className="h-px bg-[#1a1f2e] mb-4" />
 
