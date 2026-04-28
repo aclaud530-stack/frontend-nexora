@@ -4,10 +4,6 @@ import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useLoader } from '@/components/loader'
 
-/**
- * Callback Handler for Deriv OAuth2
- * Following the official Deriv API documentation
- */
 function CallbackContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -22,116 +18,41 @@ function CallbackContent() {
   const handleOAuthCallback = async () => {
     show('A processar autenticação...')
 
-    // 1. Check for error response from Deriv
+    // Verificar erro
     const error = searchParams.get('error')
-    const errorDescription = searchParams.get('error_description')
-    
     if (error) {
       setStatus('error')
-      setErrorMessage(errorDescription || `Erro de autenticação: ${error}`)
+      setErrorMessage(searchParams.get('error_description') || `Erro: ${error}`)
       hide()
       return
     }
 
-    // 2. Get authorization code and state from URL
-    const code = searchParams.get('code')
-    const returnedState = searchParams.get('state')
-    
-    if (!code) {
+    // Ler token enviado pelo backend
+    const token = searchParams.get('token')
+
+    if (!token) {
       setStatus('error')
-      setErrorMessage('Código de autorização não encontrado')
+      setErrorMessage('Token não encontrado. Tenta fazer login novamente.')
       hide()
       return
     }
 
-    // 3. Verify state matches (CSRF protection)
-    const savedState = sessionStorage.getItem('oauth_state')
-    
-    if (returnedState !== savedState) {
-      setStatus('error')
-      setErrorMessage('Erro de validação CSRF: state não corresponde')
-      hide()
-      console.error('[Callback] State mismatch:', { returnedState, savedState })
-      return
-    }
+    // Guardar token
+    localStorage.setItem('token', token)
 
-    // 4. Get the code_verifier that was stored before redirect
-    const codeVerifier = sessionStorage.getItem('pkce_code_verifier')
-    
-    if (!codeVerifier) {
-      setStatus('error')
-      setErrorMessage('Code verifier não encontrado. Por favor, tente fazer login novamente.')
-      hide()
-      return
-    }
+    // Limpar session storage
+    sessionStorage.removeItem('pkce_code_verifier')
+    sessionStorage.removeItem('oauth_state')
 
-    try {
-      // 5. Exchange authorization code for access token via backend
-      // The backend handles the actual token exchange to keep client_secret secure
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || ''
-      
-      const response = await fetch(`${apiUrl}/api/auth/callback`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json' 
-        },
-        body: JSON.stringify({ 
-          code,
-          code_verifier: codeVerifier,
-          redirect_uri: process.env.NEXT_PUBLIC_DERIV_REDIRECT_URI || `${window.location.origin}/callback`
-        }),
-      })
+    setStatus('success')
+    complete('Autenticação bem sucedida!')
 
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || data.message || `HTTP ${response.status}`)
-      }
-
-      // Backend returns { success: true, data: { accessToken, expiresIn, userId } }
-      const tokenData = data.data || data
-      
-      if (tokenData.accessToken || tokenData.access_token) {
-        // 6. Store the access token securely
-        const accessToken = tokenData.accessToken || tokenData.access_token
-        localStorage.setItem('token', accessToken)
-        
-        // Store token expiry if provided
-        const expiresIn = tokenData.expiresIn || tokenData.expires_in
-        if (expiresIn) {
-          const expiresAt = Date.now() + (expiresIn * 1000)
-          localStorage.setItem('token_expires_at', expiresAt.toString())
-        }
-        
-        // Store user ID if provided
-        if (tokenData.userId) {
-          localStorage.setItem('userId', tokenData.userId)
-        }
-        
-        // 7. Clean up session storage (PKCE values no longer needed)
-        sessionStorage.removeItem('pkce_code_verifier')
-        sessionStorage.removeItem('oauth_state')
-        
-        setStatus('success')
-        complete('Autenticação bem sucedida!')
-        
-        // 8. Redirect to dashboard
-        setTimeout(() => {
-          router.push('/dashboard')
-        }, 800)
-      } else {
-        throw new Error('Token de acesso não recebido')
-      }
-    } catch (err) {
-      console.error('[Callback] Token exchange failed:', err)
-      setStatus('error')
-      setErrorMessage(err instanceof Error ? err.message : 'Falha na autenticação')
-      hide()
-    }
+    setTimeout(() => {
+      router.push('/dashboard')
+    }, 800)
   }
 
   const handleRetry = () => {
-    // Clear any stored state and redirect to login
     sessionStorage.clear()
     localStorage.removeItem('token')
     router.push('/')
@@ -142,12 +63,12 @@ function CallbackContent() {
       <div className="text-center max-w-md">
         {status === 'loading' && (
           <div className="space-y-4">
-            <div className="animate-spin w-12 h-12 border-3 border-[#2ec7ff] border-t-transparent rounded-full mx-auto" />
+            <div className="animate-spin w-12 h-12 border-2 border-[#2ec7ff] border-t-transparent rounded-full mx-auto" />
             <p className="text-gray-400 text-lg">A processar autenticação...</p>
             <p className="text-gray-600 text-sm">Por favor, aguarde enquanto validamos as suas credenciais.</p>
           </div>
         )}
-        
+
         {status === 'success' && (
           <div className="space-y-4">
             <div className="w-16 h-16 bg-[#22c55e]/20 rounded-full flex items-center justify-center mx-auto">
@@ -159,7 +80,7 @@ function CallbackContent() {
             <p className="text-gray-500 text-sm">A redirecionar para o dashboard...</p>
           </div>
         )}
-        
+
         {status === 'error' && (
           <div className="space-y-6">
             <div className="w-16 h-16 bg-[#ef4444]/20 rounded-full flex items-center justify-center mx-auto">
@@ -189,7 +110,7 @@ export default function CallbackPage() {
     <Suspense fallback={
       <div className="min-h-screen min-h-dvh flex items-center justify-center bg-[#0a0e1a]">
         <div className="text-center space-y-4">
-          <div className="animate-spin w-12 h-12 border-3 border-[#2ec7ff] border-t-transparent rounded-full mx-auto" />
+          <div className="animate-spin w-12 h-12 border-2 border-[#2ec7ff] border-t-transparent rounded-full mx-auto" />
           <p className="text-gray-400">A carregar...</p>
         </div>
       </div>
