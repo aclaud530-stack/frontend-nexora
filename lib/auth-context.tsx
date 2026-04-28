@@ -24,25 +24,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [wsConnected, setWsConnected] = useState(false)
   const connecting = useRef(false)
 
-  // ── Ligar WebSocket autenticado via OTP ──────────────────────────────────
-
   const connectWS = useCallback(async (accountId: string) => {
     if (connecting.current) return
     connecting.current = true
 
     try {
-      // 1. Obter OTP do backend → URL WebSocket autenticado
       const { data } = await api.getOTP(accountId)
 
-      if (!data?.wsUrl) {
-        throw new Error('OTP sem wsUrl')
-      }
+      if (!data?.wsUrl) throw new Error('OTP sem wsUrl')
 
-      // 2. Conectar ao WebSocket da Deriv com URL autenticado
       await derivWs.connect(data.wsUrl)
       setWsConnected(true)
 
-      // 3. Subscrever dados em tempo real
       await derivWs.subscribeBalance()
       await derivWs.subscribeTransaction()
 
@@ -51,7 +44,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       console.error('[Auth] WS connect failed, tentando público:', error)
       setWsConnected(false)
-      // Fallback: WebSocket público para dados de mercado sem autenticação
       try {
         await derivWs.connect()
         setWsConnected(true)
@@ -64,8 +56,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // ── Verificar autenticação ao carregar ──────────────────────────────────
-
   const checkAuth = useCallback(async () => {
     const token = localStorage.getItem('token')
 
@@ -75,28 +65,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      // Carregar contas via REST (rápido)
       const { data } = await api.getAccounts()
 
       if (!data || data.length === 0) {
-        throw new Error('Sem contas')
+        setIsAuthenticated(true)
+        setIsLoading(false)
+        return
       }
 
       setAccounts(data)
-
       const savedId = localStorage.getItem('currentAccountId')
       const active = (savedId && data.find(a => a.account_id === savedId)) || data[0]
       setCurrentAccountState(active || null)
       setIsAuthenticated(true)
 
-      // Ligar WS em paralelo (não bloqueia o UI)
-      if (active) {
-        connectWS(active.account_id)
-      }
+      if (active) connectWS(active.account_id)
+
     } catch (error) {
       console.error('[Auth] checkAuth failed:', error)
-      localStorage.removeItem('token')
-      setIsAuthenticated(false)
+
+      const msg = error instanceof Error ? error.message : ''
+      if (msg.includes('401') || msg.includes('Unauthorized')) {
+        localStorage.removeItem('token')
+        setIsAuthenticated(false)
+      } else {
+        // Erro de rede/backend — mantém autenticado
+        setIsAuthenticated(true)
+      }
     } finally {
       setIsLoading(false)
     }
@@ -106,8 +101,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     checkAuth()
     return () => { derivWs.disconnect() }
   }, [checkAuth])
-
-  // ── Trocar conta ─────────────────────────────────────────────────────────
 
   const setCurrentAccount = async (account: Account) => {
     setCurrentAccountState(account)
@@ -119,13 +112,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.warn('[Auth] switchAccount REST failed:', e)
     }
 
-    // Reconectar WS com nova conta
     derivWs.disconnect()
     setWsConnected(false)
     await connectWS(account.account_id)
   }
-
-  // ── Logout ───────────────────────────────────────────────────────────────
 
   const logout = async () => {
     derivWs.disconnect()
@@ -136,8 +126,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setCurrentAccountState(null)
     window.location.href = '/'
   }
-
-  // ── Refrescar contas ─────────────────────────────────────────────────────
 
   const refreshAccounts = async () => {
     try {
