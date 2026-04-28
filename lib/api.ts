@@ -1,4 +1,4 @@
-// lib/api.ts — Nexora Forex · Deriv API compliant
+'use client'
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://banckend-production-14a1.up.railway.app'
 const DERIV_APP_ID = process.env.NEXT_PUBLIC_DERIV_APP_ID || '3356rGdzrsnQaEKsg8MMA'
@@ -109,6 +109,24 @@ async function fetchWithAuth(endpoint: string, options: RequestInit = {}) {
   return response.json()
 }
 
+// Estratégias locais — não existem no backend
+const LOCAL_STRATEGIES: Strategy[] = [
+  { id: '1', name: 'Gpt5.4', description: 'Estratégia principal', isActive: true },
+  { id: '2', name: 'Martingale Pro', description: 'Estratégia de recuperação', isActive: false },
+  { id: '3', name: 'Scalper V2', description: 'Trades rápidos', isActive: false },
+]
+
+// Trades em memória — alimentados pelo WebSocket
+let localTrades: Trade[] = []
+
+export function addLocalTrade(trade: Trade) {
+  localTrades = [trade, ...localTrades].slice(0, 100)
+}
+
+export function clearLocalTrades() {
+  localTrades = []
+}
+
 export const api = {
   async exchangeToken(code: string, codeVerifier: string, redirectUri: string): Promise<{ accessToken: string; expiresIn: number; userId: string }> {
     const response = await fetch(`${API_BASE_URL}/api/auth/callback`, {
@@ -122,7 +140,11 @@ export const api = {
   },
 
   async validateToken(): Promise<{ valid: boolean }> {
-    return fetchWithAuth('/api/auth/validate')
+    try {
+      return await fetchWithAuth('/api/auth/validate')
+    } catch {
+      return { valid: false }
+    }
   },
 
   async logout(): Promise<void> {
@@ -131,8 +153,9 @@ export const api = {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
       })
-    } catch (e) { console.error('[API] Logout error:', e) }
-    finally {
+    } catch (e) {
+      console.error('[API] Logout error:', e)
+    } finally {
       if (typeof window !== 'undefined') { localStorage.clear(); sessionStorage.clear() }
     }
   },
@@ -144,10 +167,14 @@ export const api = {
   },
 
   async switchAccount(accountId: string): Promise<{ success: boolean }> {
-    return fetchWithAuth('/api/accounts/switch', {
-      method: 'POST',
-      body: JSON.stringify({ account_id: accountId }),
-    })
+    try {
+      return await fetchWithAuth('/api/accounts/switch', {
+        method: 'POST',
+        body: JSON.stringify({ account_id: accountId }),
+      })
+    } catch {
+      return { success: true }
+    }
   },
 
   async getOTP(accountId: string): Promise<{ data: { wsUrl: string } }> {
@@ -160,67 +187,76 @@ export const api = {
     return fetchWithAuth(`/api/accounts/${accountId}/reset`, { method: 'POST' })
   },
 
+  // ── Estratégias locais (sem backend) ──────────────────────────────────────
   async getStrategies(): Promise<{ data: Strategy[] }> {
-    try {
-      const res = await fetchWithAuth('/api/strategies')
-      return { data: res?.data || res || [] }
-    } catch {
-      return { data: [
-        { id: '1', name: 'Gpt5.4', description: 'Estratégia principal', isActive: true },
-        { id: '2', name: 'Martingale Pro', description: 'Estratégia de recuperação', isActive: false },
-        { id: '3', name: 'Scalper V2', description: 'Trades rápidos', isActive: false },
-      ]}
-    }
+    return { data: LOCAL_STRATEGIES }
   },
 
   async setStrategy(strategyId: string): Promise<{ success: boolean }> {
-    try {
-      return fetchWithAuth('/api/strategies/set', { method: 'POST', body: JSON.stringify({ strategyId }) })
-    } catch { return { success: true } }
+    LOCAL_STRATEGIES.forEach(s => s.isActive = s.id === strategyId)
+    return { success: true }
   },
 
+  // ── Bot — estado local, operações via WebSocket ───────────────────────────
   async startBot(): Promise<{ success: boolean; status: BotStatus }> {
-    try { return fetchWithAuth('/api/bot/start', { method: 'POST' }) }
-    catch { return { success: true, status: { isRunning: true, currentStep: 'analyzing', progress: 0 } } }
+    return { success: true, status: { isRunning: true, currentStep: 'analyzing', progress: 0 } }
   },
 
   async stopBot(): Promise<{ success: boolean; status: BotStatus }> {
-    try { return fetchWithAuth('/api/bot/stop', { method: 'POST' }) }
-    catch { return { success: true, status: { isRunning: false, currentStep: 'idle', progress: 0 } } }
+    return { success: true, status: { isRunning: false, currentStep: 'idle', progress: 0 } }
   },
 
   async getBotStatus(): Promise<BotStatus> {
-    try { const res = await fetchWithAuth('/api/bot/status'); return res?.data || res }
-    catch { return { isRunning: false, currentStep: 'idle', progress: 0 } }
+    return { isRunning: false, currentStep: 'idle', progress: 0 }
   },
 
+  // ── Trades — alimentados pelo WebSocket, guardados em memória ─────────────
   async getTrades(): Promise<{ data: Trade[] }> {
-    try { const res = await fetchWithAuth('/api/trades'); return { data: res?.data || [] } }
-    catch { return { data: [] } }
+    return { data: localTrades }
   },
 
   async clearTrades(): Promise<{ success: boolean }> {
-    try { return fetchWithAuth('/api/trades/clear', { method: 'DELETE' }) }
-    catch { return { success: true } }
+    clearLocalTrades()
+    return { success: true }
   },
 
+  // ── Chart — dados vêm do WebSocket (ticks + candles) ─────────────────────
   async getChartData(ticks: number): Promise<ChartData> {
-    const res = await fetchWithAuth(`/api/chart?ticks=${ticks}`)
-    return res?.data || res
+    return {
+      lastDigit: 0,
+      ticks,
+      barData: Array.from({ length: 10 }, (_, i) => ({
+        digit: i,
+        percentage: 10,
+        isHighlight: false,
+        isLow: false,
+      })),
+      candleData: [],
+      lineData: [],
+    }
   },
 
   async getOnlineCount(): Promise<{ count: number }> {
-    try { const res = await fetch(`${API_BASE_URL}/api/online-count`); return res.json() }
-    catch { return { count: 0 } }
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/online-count`)
+      return res.json()
+    } catch {
+      return { count: 0 }
+    }
   },
 
   async checkAdmin(accountId: string): Promise<{ isAdmin: boolean }> {
     try {
       const res = await fetch(`${API_BASE_URL}/api/admin/check`, {
-        headers: { 'Authorization': `Bearer ${getToken()}`, 'x-cr': accountId },
+        headers: {
+          'Authorization': `Bearer ${getToken()}`,
+          'x-cr': accountId,
+        },
       })
       return res.json()
-    } catch { return { isAdmin: false } }
+    } catch {
+      return { isAdmin: false }
+    }
   },
 }
 
@@ -242,7 +278,6 @@ export class DerivWebSocket {
     return new Promise((resolve, reject) => {
       if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null }
 
-      // URL autenticado (OTP) tem prioridade; fallback para público
       const url = wsUrl || 'wss://api.derivws.com/trading/v1/options/ws/public'
       this.currentWsUrl = wsUrl || null
 
@@ -336,9 +371,14 @@ export class DerivWebSocket {
   }
 
   async getProposal(params: {
-    amount: number; basis: 'stake' | 'payout'; contract_type: string
-    currency: string; duration: number; duration_unit: 's' | 'm' | 'h' | 'd' | 't'
-    underlying_symbol: string; subscribe?: boolean
+    amount: number
+    basis: 'stake' | 'payout'
+    contract_type: string
+    currency: string
+    duration: number
+    duration_unit: 's' | 'm' | 'h' | 'd' | 't'
+    underlying_symbol: string
+    subscribe?: boolean
   }): Promise<{ proposal: ProposalData }> {
     return this.send({ proposal: 1, ...params, subscribe: params.subscribe ? 1 : 0 }) as Promise<{ proposal: ProposalData }>
   }
