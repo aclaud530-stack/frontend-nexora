@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth-context'
 import { useLoader } from '@/components/loader'
@@ -29,13 +29,11 @@ import {
 
 const WHATSAPP = '976289984'
 
-// Simulação de online count — sempre acima de 4.890.899, muda a cada 7 min
 function generateOnlineCount() {
   const base = 4890899
   return base + Math.floor(Math.random() * 50000)
 }
 
-// Avisos locais (simulados até backend ter rota)
 const LOCAL_AVISOS = [
   {
     id: '1',
@@ -90,9 +88,8 @@ export default function MenuPage() {
   const [avisosOpen, setAvisosOpen] = useState(false)
   const [termosOpen, setTermosOpen] = useState(false)
   const [termosTab, setTermosTab] = useState<'plataforma' | 'deriv'>('plataforma')
-  const [unreadAvisos] = useState(LOCAL_AVISOS.length)
+  const unreadAvisos = LOCAL_AVISOS.length
 
-  // Simular online count — atualiza a cada 7 minutos
   useEffect(() => {
     const interval = setInterval(() => {
       setOnlineCount(generateOnlineCount())
@@ -133,8 +130,6 @@ export default function MenuPage() {
     external = false,
     iconColor,
     badge,
-    notifCount,
-    chevron,
   }: {
     icon: React.ElementType
     label: string
@@ -143,8 +138,6 @@ export default function MenuPage() {
     external?: boolean
     iconColor?: string
     badge?: string
-    notifCount?: number
-    chevron?: boolean
   }) => {
     const content = (
       <>
@@ -152,18 +145,12 @@ export default function MenuPage() {
           <Icon size={18} />
         </span>
         <span className="flex-1 text-white text-sm font-medium text-left">{label}</span>
-        {notifCount !== undefined && notifCount > 0 && (
-          <span className="w-5 h-5 bg-[#ef4444] text-white text-xs font-bold rounded-full flex items-center justify-center">
-            {notifCount}
-          </span>
-        )}
         {badge && (
           <span className="px-2 py-0.5 bg-[#a855f7]/20 text-[#a855f7] text-xs font-semibold rounded-full">
             {badge}
           </span>
         )}
         {external && <ExternalLink size={13} className="text-gray-500" />}
-        {chevron && <ChevronDown size={13} className="text-gray-500" />}
       </>
     )
 
@@ -194,7 +181,6 @@ export default function MenuPage() {
 
   return (
     <div className="min-h-screen min-h-dvh bg-[#0a0e1a] text-white">
-      {/* Close Button */}
       <button
         onClick={goBack}
         className="fixed top-4 right-4 z-50 p-2 rounded-full bg-[#1a1f2e] hover:bg-[#2a3142] transition-colors"
@@ -266,7 +252,7 @@ export default function MenuPage() {
             external
           />
 
-          {/* Avisos com badge e dropdown */}
+          {/* Avisos com badge */}
           <button
             onClick={() => setAvisosOpen(!avisosOpen)}
             className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#1a1f2e] rounded-xl transition-colors"
@@ -282,7 +268,7 @@ export default function MenuPage() {
             )}
             <ChevronDown
               size={13}
-              className={`text-gray-500 transition-transform ${avisosOpen ? 'rotate-180' : ''}`}
+              className={`text-gray-500 transition-transform duration-200 ${avisosOpen ? 'rotate-180' : ''}`}
             />
           </button>
 
@@ -291,7 +277,7 @@ export default function MenuPage() {
               {LOCAL_AVISOS.map((aviso, idx) => (
                 <div
                   key={aviso.id}
-                  className={`px-4 py-3 ${idx < LOCAL_AVISOS.length - 1 ? 'border-b border-[#2a3142]' : ''} bg-[#0d1117]`}
+                  className={`px-4 py-3 bg-[#0d1117] ${idx < LOCAL_AVISOS.length - 1 ? 'border-b border-[#2a3142]' : ''}`}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-white text-xs font-semibold">{aviso.titulo}</span>
@@ -303,7 +289,7 @@ export default function MenuPage() {
             </div>
           )}
 
-          {/* Treinamento — abre WhatsApp com mensagem de solicitação */}
+          {/* Treinamento — WhatsApp com mensagem de solicitação */}
           <MenuItem
             icon={GraduationCap}
             label="TREINAMENTO COMPLETO"
@@ -348,20 +334,17 @@ export default function MenuPage() {
             <span className="flex-1 text-white text-sm font-medium text-left">TERMOS E CONDIÇÕES</span>
             <ChevronDown
               size={13}
-              className={`text-gray-500 transition-transform ${termosOpen ? 'rotate-180' : ''}`}
+              className={`text-gray-500 transition-transform duration-200 ${termosOpen ? 'rotate-180' : ''}`}
             />
           </button>
 
           {termosOpen && (
             <div className="mx-2 rounded-xl overflow-hidden border border-[#2a3142] bg-[#0d1117]">
-              {/* Tabs */}
               <div className="flex border-b border-[#2a3142]">
                 <button
                   onClick={() => setTermosTab('plataforma')}
                   className={`flex-1 py-2.5 text-xs font-semibold transition-colors ${
-                    termosTab === 'plataforma'
-                      ? 'text-[#2ec7ff] border-b-2 border-[#2ec7ff]'
-                      : 'text-gray-500'
+                    termosTab === 'plataforma' ? 'text-[#2ec7ff] border-b-2 border-[#2ec7ff]' : 'text-gray-500'
                   }`}
                 >
                   NEXORA FOREX
@@ -369,9 +352,7 @@ export default function MenuPage() {
                 <button
                   onClick={() => setTermosTab('deriv')}
                   className={`flex-1 py-2.5 text-xs font-semibold transition-colors ${
-                    termosTab === 'deriv'
-                      ? 'text-[#2ec7ff] border-b-2 border-[#2ec7ff]'
-                      : 'text-gray-500'
+                    termosTab === 'deriv' ? 'text-[#2ec7ff] border-b-2 border-[#2ec7ff]' : 'text-gray-500'
                   }`}
                 >
                   DERIV
