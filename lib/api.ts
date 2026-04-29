@@ -281,7 +281,9 @@ export class DerivWebSocket {
     return new Promise((resolve, reject) => {
       if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null }
 
-      const url = wsUrl || 'wss://api.derivws.com/trading/v1/options/ws/public'
+      // URL pública para dados de mercado (sem OTP) conforme documentação
+      const PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public'
+      const url = wsUrl || PUBLIC_WS_URL
       this.currentWsUrl = wsUrl || null
 
       this.ws = new WebSocket(url)
@@ -365,12 +367,83 @@ export class DerivWebSocket {
 
   off(type: string, callback: MessageHandler) { this.listeners.get(type)?.delete(callback) }
 
-  async subscribeBalance(): Promise<void> { await this.send({ balance: 1, subscribe: 1 }) }
-  async subscribeTransaction(): Promise<void> { await this.send({ transaction: 1, subscribe: 1 }) }
-  async subscribeTicks(symbol: string): Promise<void> { await this.send({ ticks: symbol, subscribe: 1 }) }
+  // Subscreve saldo em tempo real conforme documentação
+  // balance: 1, subscribe: 1 (opcional 0 para opt-out)
+  async subscribeBalance(): Promise<void> { 
+    await this.send({ balance: 1, subscribe: 1 }) 
+  }
+  
+  // Subscreve notificações de transações em tempo real
+  async subscribeTransaction(): Promise<void> { 
+    await this.send({ transaction: 1, subscribe: 1 }) 
+  }
+  
+  // Subscreve stream de ticks em tempo real para um símbolo
+  async subscribeTicks(symbol: string): Promise<void> { 
+    await this.send({ ticks: symbol, subscribe: 1 }) 
+  }
 
-  async getTicksHistory(symbol: string, count = 60, style: 'ticks' | 'candles' = 'candles', granularity = 60): Promise<unknown> {
-    return this.send({ ticks_history: symbol, end: 'latest', count, style, granularity })
+  // Obtém lista de símbolos ativos disponíveis para trading
+  // active_symbols: "brief" para dados mínimos, "full" para dados completos
+  async getActiveSymbols(mode: 'brief' | 'full' = 'brief'): Promise<unknown> {
+    return this.send({ active_symbols: mode })
+  }
+
+  // Obtém tipos de contrato disponíveis para um símbolo específico
+  async getContractsFor(symbol: string): Promise<unknown> {
+    return this.send({ contracts_for: symbol })
+  }
+
+  // Obtém lista de todas as categorias de contrato disponíveis
+  async getContractsList(): Promise<unknown> {
+    return this.send({ contracts_list: 1 })
+  }
+
+  // Obtém tempo atual do servidor
+  async getServerTime(): Promise<unknown> {
+    return this.send({ time: 1 })
+  }
+
+  // Obtém horários de trading para todos os símbolos
+  // date: formato 'yyyy-mm-dd' ou 'today'
+  async getTradingTimes(date: string = 'today'): Promise<unknown> {
+    return this.send({ trading_times: date })
+  }
+
+  // Obtém portfolio (posições abertas) do utilizador autenticado
+  async getPortfolio(): Promise<unknown> {
+    return this.send({ portfolio: 1 })
+  }
+
+  // Obtém tabela de lucro/prejuízo de trades completos
+  async getProfitTable(limit = 25, offset = 0): Promise<unknown> {
+    return this.send({ profit_table: 1, description: 1, limit, offset })
+  }
+
+  // Obtém extrato da conta com histórico de transações
+  async getStatement(limit = 100): Promise<unknown> {
+    return this.send({ statement: 1, description: 1, limit })
+  }
+
+  // Obtém histórico de ticks/candles conforme documentação
+  // granularity permitida: 60, 120, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400
+  async getTicksHistory(
+    symbol: string, 
+    count = 60, 
+    style: 'ticks' | 'candles' = 'candles', 
+    granularity = 60
+  ): Promise<unknown> {
+    const request: Record<string, unknown> = { 
+      ticks_history: symbol, 
+      end: 'latest', 
+      count, 
+      style 
+    }
+    // granularity só é usado para candles
+    if (style === 'candles') {
+      request.granularity = granularity
+    }
+    return this.send(request)
   }
 
   async getProposal(params: {
@@ -381,25 +454,70 @@ export class DerivWebSocket {
     duration: number
     duration_unit: 's' | 'm' | 'h' | 'd' | 't'
     underlying_symbol: string
+    barrier?: string
+    barrier2?: string
+    growth_rate?: number
+    limit_order?: { stop_loss?: number; take_profit?: number }
+    multiplier?: number
+    selected_tick?: number
     subscribe?: boolean
   }): Promise<{ proposal: ProposalData }> {
-    return this.send({ proposal: 1, ...params, subscribe: params.subscribe ? 1 : 0 }) as Promise<{ proposal: ProposalData }>
+    const { subscribe, ...rest } = params
+    return this.send({ 
+      proposal: 1, 
+      ...rest, 
+      subscribe: subscribe ? 1 : 0 
+    }) as Promise<{ proposal: ProposalData }>
   }
 
-  async buyContract(proposalId: string, price: number): Promise<unknown> {
-    return this.send({ buy: proposalId, price })
+  // Compra contrato usando proposal ID conforme documentação
+  // buy: proposalId, price: preço máximo disposto a pagar
+  async buyContract(proposalId: string, price: number, subscribe?: boolean): Promise<unknown> {
+    return this.send({ 
+      buy: proposalId, 
+      price,
+      ...(subscribe ? { subscribe: 1 } : {})
+    })
   }
 
-  async sellContract(contractId: number, price: number): Promise<unknown> {
+  // Vende contrato aberto antes do expiry conforme documentação
+  // sell: contractId, price: preço mínimo aceitável (0 = vender a mercado)
+  async sellContract(contractId: number, price: number = 0): Promise<unknown> {
     return this.send({ sell: contractId, price })
   }
 
+  // Subscreve atualizações de contrato aberto em tempo real
   async subscribeOpenContract(contractId: number): Promise<void> {
     await this.send({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 })
   }
 
-  async forgetAll(types: string[]): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) await this.send({ forget_all: types }).catch(() => {})
+  // Atualiza stop_loss/take_profit de contrato aberto conforme documentação
+  async updateContract(contractId: number, limitOrder: { stop_loss?: number | null; take_profit?: number | null }): Promise<unknown> {
+    return this.send({ 
+      contract_update: 1, 
+      contract_id: contractId, 
+      limit_order: limitOrder 
+    })
+  }
+
+  // Cancela contrato (se cancellation disponível)
+  async cancelContract(contractId: number): Promise<unknown> {
+    return this.send({ cancel: contractId })
+  }
+
+  // Cancela subscrição específica por ID conforme documentação
+  async forget(subscriptionId: string): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      await this.send({ forget: subscriptionId }).catch(() => {})
+    }
+  }
+
+  // Cancela todas as subscrições de um tipo específico conforme documentação
+  // Tipos: ticks, proposal, balance, transaction, proposal_open_contract
+  async forgetAll(types: string | string[]): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      await this.send({ forget_all: types }).catch(() => {})
+    }
   }
 
   disconnect() {

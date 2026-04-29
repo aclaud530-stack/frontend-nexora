@@ -228,12 +228,13 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     if (!derivWs.isConnected) return
 
     // 1. Histórico de candles (1 min granularidade, últimas 120 velas)
+    // Resposta conforme documentação: { candles: [{ epoch, open, high, low, close }, ...] }
     try {
       const res = await derivWs.getTicksHistory(DEFAULT_SYMBOL, MAX_CANDLES, 'candles', 60) as Record<string, unknown>
-      const raw = res?.candles as Array<Record<string, number>> | undefined
+      const raw = res?.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }> | undefined
       if (Array.isArray(raw)) {
         const parsed: CandleData[] = raw.map(c => ({
-          x: c.epoch * 1000,
+          x: c.epoch * 1000,  // Converter epoch para milissegundos
           o: c.open,
           h: c.high,
           l: c.low,
@@ -250,13 +251,14 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     } catch (e) { console.warn('[Trading] subscribeTicks falhou:', e) }
 
     // 3. Listener de ticks — actualiza gráfico sem re-render extra
+    // Resposta conforme documentação: { tick: { ask, bid, epoch, id, pip_size, quote, symbol } }
     const unsubTick = derivWs.on('tick', (raw: unknown) => {
       const msg  = raw as Record<string, unknown>
-      const tick = msg.tick as Record<string, unknown> | undefined
+      const tick = msg.tick as { ask?: number; bid?: number; epoch: number; quote: number; symbol: string } | undefined
       if (!tick) return
 
-      const price = tick.quote as number
-      const epoch = tick.epoch as number
+      const price = tick.quote
+      const epoch = tick.epoch
 
       setCurrentPrice(price)
       const digit = getLastDigit(price)
@@ -296,33 +298,42 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     if (!derivWs.isConnected) return
 
     // Listener de saldo em tempo real
+    // Resposta conforme documentação: { balance: { balance, currency, id, loginid }, msg_type: "balance" }
     const unsubBal = derivWs.on('balance', (raw: unknown) => {
       const msg = raw as Record<string, unknown>
-      const b   = msg.balance as Record<string, unknown> | undefined
+      const b   = msg.balance as { balance: number; currency: string; id?: string; loginid?: string } | undefined
       if (!b) return
-      const newBal = b.balance as number
-      setCurrency((b.currency as string) ?? 'USD')
+      const newBal = b.balance
+      setCurrency(b.currency ?? 'USD')
       setBalance(newBal)
       if (initialBalRef.current === null) initialBalRef.current = newBal
       setProfit(+(newBal - (initialBalRef.current ?? newBal)).toFixed(2))
     })
 
     // Listener de transações — adiciona trade ao histórico automaticamente
+    // Resposta conforme documentação: { transaction: { action, amount, transaction_id, transaction_time, ... } }
     const unsubTx = derivWs.on('transaction', (raw: unknown) => {
       const msg = raw as Record<string, unknown>
-      const tx  = msg.transaction as Record<string, unknown> | undefined
+      const tx  = msg.transaction as { 
+        action: string
+        amount?: number
+        transaction_id?: number
+        transaction_time?: number
+        contract_id?: number
+        contract_type?: string
+      } | undefined
       if (!tx) return
 
       // Só registar quando é uma venda/fecho de contrato
-      const action = tx.action as string
+      const action = tx.action
       if (action !== 'sell') return
 
-      const pnl    = (tx.amount as number) ?? 0
-      const epoch  = (tx.transaction_time as number) ?? Math.floor(Date.now() / 1000)
+      const pnl    = tx.amount ?? 0
+      const epoch  = tx.transaction_time ?? Math.floor(Date.now() / 1000)
       const trade: Trade = {
-        id:         (tx.transaction_id as number) ?? Date.now(),
+        id:         tx.transaction_id ?? Date.now(),
         hora:       toHora(epoch),
-        tipo:       (tx.contract_type as string) ?? (action),
+        tipo:       tx.contract_type ?? action,
         tickFinal:  '—',
         preco:      `$${Math.abs(pnl).toFixed(2)}`,
         resultado:  +pnl.toFixed(2),
@@ -330,48 +341,63 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       }
       setTrades(prev => [trade, ...prev].slice(0, 500))
       addLocalTrade({
-        id:          trade.id as string,
+        id:          String(trade.id),
         hora:        trade.hora,
         tipo:        trade.tipo,
         tickFinal:   trade.tickFinal as string,
         preco:       trade.preco,
         resultado:   trade.resultado,
         timestamp:   epoch * 1000,
-        contract_id: tx.contract_id as number,
+        contract_id: tx.contract_id,
       })
     })
 
     // Listener de contrato fechado — actualiza wins/losses e o trade com detalhe
+    // Resposta conforme documentação: { proposal_open_contract: { contract_id, status, profit, ... } }
     const unsubPOC = derivWs.on('proposal_open_contract', (raw: unknown) => {
       const msg = raw as Record<string, unknown>
-      const poc = msg.proposal_open_contract as Record<string, unknown> | undefined
+      const poc = msg.proposal_open_contract as { 
+        id?: string
+        contract_id?: number
+        contract_type?: string
+        status?: string
+        is_sold?: boolean
+        profit?: number
+        sell_price?: number
+        bid_price?: number
+        buy_price?: number
+        sell_time?: number
+        date_expiry?: number
+        purchase_time?: number
+        exit_tick?: number
+      } | undefined
       if (!poc) return
 
-      // Guardar subId
+      // Guardar subId para cancelar subscrição depois
       if (poc.id && openContractRef.current && !openContractRef.current.subId) {
-        openContractRef.current.subId = poc.id as string
+        openContractRef.current.subId = poc.id
       }
 
-      const status = poc.status as string
+      const status = poc.status
       const closed = status === 'sold' || status === 'won' || status === 'lost' || !!poc.is_sold
       if (!closed) return
 
-      const pnl    = (poc.profit as number) ?? 0
+      const pnl    = poc.profit ?? 0
       const isWin  = pnl >= 0
-      const sellP  = ((poc.sell_price ?? poc.bid_price ?? 0) as number)
-      const buyP   = ((poc.buy_price ?? 0) as number)
-      const epoch  = ((poc.sell_time ?? poc.date_expiry ?? Math.floor(Date.now() / 1000)) as number)
-      const exitTick = (poc.exit_tick ?? 0) as number
+      const sellP  = poc.sell_price ?? poc.bid_price ?? 0
+      const buyP   = poc.buy_price ?? 0
+      const epoch  = poc.sell_time ?? poc.date_expiry ?? Math.floor(Date.now() / 1000)
+      const exitTick = poc.exit_tick ?? 0
 
       const trade: Trade = {
-        id:         poc.contract_id as number,
+        id:         poc.contract_id ?? Date.now(),
         hora:       toHora(epoch),
-        tipo:       (poc.contract_type as string) ?? '—',
+        tipo:       poc.contract_type ?? '—',
         tickFinal:  getLastDigit(exitTick),
         preco:      `$${sellP.toFixed(2)}`,
         resultado:  +pnl.toFixed(2),
         amount:     +buyP.toFixed(2),
-        created_at: new Date(((poc.purchase_time as number) ?? epoch) * 1000).toISOString(),
+        created_at: new Date((poc.purchase_time ?? epoch) * 1000).toISOString(),
       }
 
       // Substituir ou adicionar ao histórico (evitar duplicado da transação)
@@ -388,9 +414,9 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       if (isWin) setWins(w => w + 1)
       else       setLosses(l => l + 1)
 
-      // Cancelar subscrição do contrato
+      // Cancelar subscrição do contrato usando forget conforme documentação
       if (openContractRef.current?.subId) {
-        derivWs.send({ forget: openContractRef.current.subId }).catch(() => {})
+        derivWs.forget(openContractRef.current.subId).catch(() => {})
       }
       openContractRef.current = null
       setBotStatus(prev => ({ ...prev, currentStep: 'contract_closed' }))
