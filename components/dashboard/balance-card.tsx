@@ -69,7 +69,7 @@ function AccountRow({
       </div>
 
       <div className="text-white text-[11px] font-bold shrink-0">
-        ${(account.balance ?? 0).toFixed(2)}
+        ${Number(account.balance ?? 0).toFixed(2)}
       </div>
 
       {isActive && (
