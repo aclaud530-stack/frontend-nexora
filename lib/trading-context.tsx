@@ -84,6 +84,18 @@ export interface BuyParams {
   symbol?: string
 }
 
+// ── Conta para o switcher ─────────────────────────────────────────────────────
+
+export interface TradingAccount {
+  loginid: string
+  account_type: 'real' | 'demo'
+  balance: number
+  currency: string
+  token: string
+  is_virtual: boolean
+  landing_company_shortcode?: string
+}
+
 interface TradingContextValue {
   isConnected: boolean
   balance: number
@@ -107,6 +119,11 @@ interface TradingContextValue {
   stopBot: () => void
   buyContract: (p: BuyParams) => void
   sellContract: (contractId: number) => void
+  // ── Contas ────────────────────────────────────────────────────────────────
+  availableAccounts: TradingAccount[]
+  activeAccount: TradingAccount | null
+  isSwitchingAccount: boolean
+  switchAccount: (account: TradingAccount) => Promise<void>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,6 +171,26 @@ function toHora(epochSec: number): string {
   })
 }
 
+// Lê contas guardadas no localStorage
+function loadStoredAccounts(): TradingAccount[] {
+  try {
+    const raw = localStorage.getItem('trading_accounts')
+    return raw ? (JSON.parse(raw) as TradingAccount[]) : []
+  } catch {
+    return []
+  }
+}
+
+function loadActiveAccount(accounts: TradingAccount[]): TradingAccount | null {
+  try {
+    const loginid = localStorage.getItem('active_account')
+    if (loginid) return accounts.find(a => a.loginid === loginid) ?? accounts[0] ?? null
+    return accounts[0] ?? null
+  } catch {
+    return accounts[0] ?? null
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Contexto
 // ─────────────────────────────────────────────────────────────────────────────
@@ -173,7 +210,7 @@ export function useTrading(): TradingContextValue {
 export function TradingProvider({ children }: { children: ReactNode }) {
   const { currentAccount, wsConnected } = useAuth()
 
-  // ── Refs mutáveis (não causam re-render) ──────────────────────────────────
+  // ── Refs mutáveis ─────────────────────────────────────────────────────────
   const digitHistRef      = useRef<number[]>([])
   const candleBufRef      = useRef<CandleData[]>([])
   const selectedTicksRef  = useRef(100)
@@ -182,7 +219,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   const botTimerRef       = useRef<ReturnType<typeof setInterval> | null>(null)
   const mountedRef        = useRef(true)
   const strategyRef       = useRef<Strategy | null>(DEFAULT_STRATEGIES[0])
-  // Cleanup functions para remover listeners do derivWs
   const unsubsRef         = useRef<Array<() => void>>([])
 
   // ── Estado React ──────────────────────────────────────────────────────────
@@ -200,6 +236,12 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   const [strategies]                            = useState<Strategy[]>(DEFAULT_STRATEGIES)
   const [currentStrategy,  _setCurrentStrategy] = useState<Strategy | null>(DEFAULT_STRATEGIES[0])
   const [botStatus,        setBotStatus]        = useState<BotStatus>({ isRunning: false, currentStep: 'idle' })
+
+  // ── Estado de contas ──────────────────────────────────────────────────────
+  const storedAccounts = loadStoredAccounts()
+  const [availableAccounts,   setAvailableAccounts]   = useState<TradingAccount[]>(storedAccounts)
+  const [activeAccount,       setActiveAccount]       = useState<TradingAccount | null>(loadActiveAccount(storedAccounts))
+  const [isSwitchingAccount,  setIsSwitchingAccount]  = useState(false)
 
   // ── Setters com sincronização de ref ──────────────────────────────────────
 
@@ -222,12 +264,111 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     unsubsRef.current = []
   }, [])
 
+  // ── Reset de estado ao trocar conta ───────────────────────────────────────
+
+  const resetAccountState = useCallback((account: TradingAccount) => {
+    initialBalRef.current  = null
+    digitHistRef.current   = []
+    candleBufRef.current   = []
+    openContractRef.current = null
+
+    setBalance(account.balance)
+    setCurrency(account.currency)
+    setProfit(0)
+    setWins(0)
+    setLosses(0)
+    setTrades([])
+    setChartData({ barData: [], candleData: [], lastDigit: 0 })
+  }, [])
+
+  // ── Trocar de conta ───────────────────────────────────────────────────────
+
+  const switchAccount = useCallback(async (account: TradingAccount) => {
+    if (isSwitchingAccount) return
+    setIsSwitchingAccount(true)
+
+    try {
+      // 1. Parar bot se estiver a correr
+      if (botTimerRef.current) {
+        clearInterval(botTimerRef.current)
+        botTimerRef.current = null
+      }
+      setBotStatus({ isRunning: false, currentStep: 'idle' })
+
+      // 2. Cancelar contrato aberto
+      if (openContractRef.current) {
+        try { await derivWs.sellContract(openContractRef.current.contractId, 0) } catch { /* ignora */ }
+        openContractRef.current = null
+      }
+
+      // 3. Remover todos os listeners
+      removeAllListeners()
+
+      // 4. Guardar nova conta activa
+      localStorage.setItem('active_account', account.loginid)
+      localStorage.setItem('token', account.token)
+
+      // 5. Re-autorizar o WebSocket com o novo token
+      await derivWs.authorize(account.token)
+
+      // 6. Actualizar contas disponíveis a partir da resposta de autorização
+      //    (o derivWs.authorize deve retornar account_list — ajusta se necessário)
+      try {
+        const authRes = await derivWs.send({ authorize: account.token }) as Record<string, unknown>
+        const authData = authRes.authorize as Record<string, unknown> | undefined
+
+        if (authData?.account_list) {
+          const list = authData.account_list as Array<Record<string, unknown>>
+          const mapped: TradingAccount[] = list.map(acc => ({
+            loginid:                    acc.loginid as string,
+            account_type:               acc.is_virtual ? 'demo' : 'real',
+            balance:                    (acc.balance as number) ?? 0,
+            currency:                   acc.currency as string,
+            token:                      acc.token as string,
+            is_virtual:                 acc.is_virtual as boolean,
+            landing_company_shortcode:  acc.landing_company_shortcode as string | undefined,
+          }))
+          setAvailableAccounts(mapped)
+          localStorage.setItem('trading_accounts', JSON.stringify(mapped))
+
+          // Actualizar saldo real da conta escolhida
+          const fresh = mapped.find(a => a.loginid === account.loginid)
+          if (fresh) {
+            setActiveAccount(fresh)
+            resetAccountState(fresh)
+          } else {
+            setActiveAccount(account)
+            resetAccountState(account)
+          }
+        } else {
+          setActiveAccount(account)
+          resetAccountState(account)
+        }
+      } catch {
+        // Fallback: usa os dados que já temos
+        setActiveAccount(account)
+        resetAccountState(account)
+      }
+
+      // 7. Re-iniciar subscrições
+      await initAccountSubs()
+      await initMarketSubs()
+      await loadTradeHistory()
+
+    } catch (e) {
+      console.error('[Trading] switchAccount falhou:', e)
+    } finally {
+      setIsSwitchingAccount(false)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSwitchingAccount, removeAllListeners, resetAccountState])
+
   // ── Inicializar subscrições de mercado via derivWs ────────────────────────
 
   const initMarketSubs = useCallback(async () => {
     if (!derivWs.isConnected) return
 
-    // 1. Histórico de candles (1 min granularidade, últimas 120 velas)
+    // 1. Histórico de candles
     try {
       const res = await derivWs.getTicksHistory(DEFAULT_SYMBOL, MAX_CANDLES, 'candles', 60) as Record<string, unknown>
       const raw = res?.candles as Array<Record<string, number>> | undefined
@@ -249,7 +390,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       await derivWs.subscribeTicks(DEFAULT_SYMBOL)
     } catch (e) { console.warn('[Trading] subscribeTicks falhou:', e) }
 
-    // 3. Listener de ticks — actualiza gráfico sem re-render extra
+    // 3. Listener de ticks
     const unsubTick = derivWs.on('tick', (raw: unknown) => {
       const msg  = raw as Record<string, unknown>
       const tick = msg.tick as Record<string, unknown> | undefined
@@ -262,14 +403,12 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       const digit = getLastDigit(price)
       setLastDigit(digit)
 
-      // Histórico de dígitos
       const hist = digitHistRef.current
       hist.push(digit)
       if (hist.length > MAX_DIGIT_HIST) hist.shift()
 
       const barData = computeBarData(hist.slice(-selectedTicksRef.current))
 
-      // Candle do minuto actual
       const buf      = candleBufRef.current
       const msNow    = epoch * 1000
       const minStart = Math.floor(msNow / 60_000) * 60_000
@@ -290,12 +429,11 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     unsubsRef.current.push(unsubTick)
   }, [])
 
-  // ── Inicializar subscrições de conta (saldo + transações) ─────────────────
+  // ── Inicializar subscrições de conta ──────────────────────────────────────
 
   const initAccountSubs = useCallback(() => {
     if (!derivWs.isConnected) return
 
-    // Listener de saldo em tempo real
     const unsubBal = derivWs.on('balance', (raw: unknown) => {
       const msg = raw as Record<string, unknown>
       const b   = msg.balance as Record<string, unknown> | undefined
@@ -305,15 +443,22 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       setBalance(newBal)
       if (initialBalRef.current === null) initialBalRef.current = newBal
       setProfit(+(newBal - (initialBalRef.current ?? newBal)).toFixed(2))
+
+      // Actualiza saldo na lista de contas disponíveis
+      setAvailableAccounts(prev =>
+        prev.map(a =>
+          a.loginid === (b.loginid as string)
+            ? { ...a, balance: newBal }
+            : a
+        )
+      )
     })
 
-    // Listener de transações — adiciona trade ao histórico automaticamente
     const unsubTx = derivWs.on('transaction', (raw: unknown) => {
       const msg = raw as Record<string, unknown>
       const tx  = msg.transaction as Record<string, unknown> | undefined
       if (!tx) return
 
-      // Só registar quando é uma venda/fecho de contrato
       const action = tx.action as string
       if (action !== 'sell') return
 
@@ -322,7 +467,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       const trade: Trade = {
         id:         (tx.transaction_id as number) ?? Date.now(),
         hora:       toHora(epoch),
-        tipo:       (tx.contract_type as string) ?? (action),
+        tipo:       (tx.contract_type as string) ?? action,
         tickFinal:  '—',
         preco:      `$${Math.abs(pnl).toFixed(2)}`,
         resultado:  +pnl.toFixed(2),
@@ -341,13 +486,11 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       })
     })
 
-    // Listener de contrato fechado — actualiza wins/losses e o trade com detalhe
     const unsubPOC = derivWs.on('proposal_open_contract', (raw: unknown) => {
       const msg = raw as Record<string, unknown>
       const poc = msg.proposal_open_contract as Record<string, unknown> | undefined
       if (!poc) return
 
-      // Guardar subId
       if (poc.id && openContractRef.current && !openContractRef.current.subId) {
         openContractRef.current.subId = poc.id as string
       }
@@ -374,7 +517,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
         created_at: new Date(((poc.purchase_time as number) ?? epoch) * 1000).toISOString(),
       }
 
-      // Substituir ou adicionar ao histórico (evitar duplicado da transação)
       setTrades(prev => {
         const exists = prev.findIndex(t => t.id === trade.id)
         if (exists >= 0) {
@@ -388,7 +530,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       if (isWin) setWins(w => w + 1)
       else       setLosses(l => l + 1)
 
-      // Cancelar subscrição do contrato
       if (openContractRef.current?.subId) {
         derivWs.send({ forget: openContractRef.current.subId }).catch(() => {})
       }
@@ -405,7 +546,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     unsubsRef.current.push(unsubBal, unsubTx, unsubPOC)
   }, [])
 
-  // ── Carregar histórico de trades do servidor ──────────────────────────────
+  // ── Carregar histórico de trades ───────────────────────────────────────────
 
   const loadTradeHistory = useCallback(async () => {
     setIsLoadingTrades(true)
@@ -440,6 +581,17 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       initAccountSubs()
       initMarketSubs()
       loadTradeHistory()
+
+      // Popular contas disponíveis a partir da autorização inicial
+      // O auth-context já autorizou — tentamos obter account_list
+      ;(async () => {
+        try {
+          const res = await derivWs.send({ get_account_status: 1 }) as Record<string, unknown>
+          // Se tiveres account_list na resposta de authorize do auth-context,
+          // guarda-a lá e lê aqui do localStorage (já feito no useState acima)
+          void res
+        } catch { /* ignora */ }
+      })()
     }
 
     return () => {
@@ -449,7 +601,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     }
   }, [wsConnected, initAccountSubs, initMarketSubs, loadTradeHistory, removeAllListeners])
 
-  // Quando a conta muda — resetar saldo inicial para novo cálculo de profit
+  // Quando a conta muda via auth-context
   useEffect(() => {
     if (currentAccount) {
       initialBalRef.current = null
@@ -459,17 +611,27 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       setWins(0)
       setLosses(0)
       setTrades([])
-      digitHistRef.current   = []
-      candleBufRef.current   = []
+      digitHistRef.current  = []
+      candleBufRef.current  = []
     }
   }, [currentAccount?.account_id])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Escuta evento global 'account-switch' (disparado pelo AccountSwitcher) ─
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const account = (e as CustomEvent<TradingAccount>).detail
+      switchAccount(account)
+    }
+    window.addEventListener('account-switch', handler)
+    return () => window.removeEventListener('account-switch', handler)
+  }, [switchAccount])
 
   // ── Trading ───────────────────────────────────────────────────────────────
 
   const buyContract = useCallback(async (params: BuyParams) => {
     setBotStatus(prev => ({ ...prev, currentStep: 'analyzing' }))
     try {
-      // 1. Proposta
       const propRes = await derivWs.getProposal({
         amount:            params.stake,
         basis:             'stake',
@@ -483,7 +645,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       const proposalId = proposal.id
       const askPrice   = proposal.ask_price
 
-      // 2. Comprar
       const buyRes = await derivWs.buyContract(proposalId, askPrice) as Record<string, unknown>
       if (buyRes.error) {
         console.error('[Trading] Erro na compra:', buyRes.error)
@@ -494,7 +655,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       const contractId = buy.contract_id as number
       openContractRef.current = { contractId }
 
-      // 3. Subscrever actualizações
       await derivWs.subscribeOpenContract(contractId)
       setBotStatus(prev => ({ ...prev, currentStep: 'contract_open' }))
     } catch (e) {
@@ -578,6 +738,11 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     stopBot,
     buyContract,
     sellContract,
+    // ── Contas ────────────────────────────────────────────────────────────
+    availableAccounts,
+    activeAccount,
+    isSwitchingAccount,
+    switchAccount,
   }
 
   return (
