@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { ChartSection } from '@/components/dashboard/chart-section'
 import { BalanceCard } from '@/components/dashboard/balance-card'
@@ -9,11 +9,13 @@ import { TradesTable } from '@/components/dashboard/trades-table'
 import { Footer } from '@/components/dashboard/footer'
 import { useAuth } from '@/lib/auth-context'
 import { useLoader } from '@/components/loader'
+import { DashboardLoader } from '@/components/ui/dashboard-loader'
 
 export default function TradingDashboard() {
   const router = useRouter()
-  const { isLoading: authLoading } = useAuth()
+  const { isLoading: authLoading, currentAccount } = useAuth()
   const { show, complete } = useLoader()
+  const [isInitializing, setIsInitializing] = useState(true)
 
   useEffect(() => {
     const token = localStorage.getItem('token')
@@ -22,21 +24,25 @@ export default function TradingDashboard() {
       router.push('/')
       return
     }
-    if (!authLoading) {
-      complete('Pronto!')
+    if (!authLoading && currentAccount) {
+      // Pequeno delay para transição suave
+      const timer = setTimeout(() => {
+        setIsInitializing(false)
+        complete('Pronto!')
+      }, 500)
+      return () => clearTimeout(timer)
     }
-  }, [authLoading, router, show, complete])
+  }, [authLoading, currentAccount, router, show, complete])
 
   const handleMenuClick = () => {
     show('A carregar...')
     router.push('/menu')
   }
 
-  if (authLoading) {
+  // Loader inicial do dashboard
+  if (authLoading || isInitializing) {
     return (
-      <div className="h-screen h-dvh bg-[#0a0e1a] flex items-center justify-center">
-        <div className="animate-spin w-8 h-8 border-2 border-[#2ec7ff] border-t-transparent rounded-full" />
-      </div>
+      <DashboardLoader message={authLoading ? 'A carregar conta...' : 'A preparar dashboard...'} />
     )
   }
 
