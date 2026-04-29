@@ -479,7 +479,11 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (currentAccount) {
       initialBalRef.current = null
-      setBalance(currentAccount.balance ?? 0)
+      // Garantir que balance é sempre number (pode vir como string da API)
+      const bal = typeof currentAccount.balance === 'string' 
+        ? parseFloat(currentAccount.balance) 
+        : (currentAccount.balance ?? 0)
+      setBalance(bal)
       setCurrency(currentAccount.currency ?? 'USD')
       setProfit(0)
       setWins(0)
