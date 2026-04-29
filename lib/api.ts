@@ -9,7 +9,7 @@ export interface Account {
   loginid: string
   full_name?: string
   name?: string
-  balance: number
+  balance: number | string
   currency: string
   is_virtual: boolean
   account_type: 'demo' | 'real'
@@ -162,8 +162,11 @@ export const api = {
 
   async getAccounts(): Promise<{ data: Account[] }> {
     const res = await fetchWithAuth('/api/accounts')
-    const accounts = res?.data?.accounts || res?.data || []
-    return { data: Array.isArray(accounts) ? accounts : [] }
+    const raw = res?.data?.accounts || res?.data || []
+    const accounts: Account[] = Array.isArray(raw)
+      ? raw.map((a: Account) => ({ ...a, balance: Number(a.balance ?? 0) }))
+      : []
+    return { data: accounts }
   },
 
   async switchAccount(accountId: string): Promise<{ success: boolean }> {
