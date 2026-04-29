@@ -3,14 +3,14 @@
 /**
  * lib/trading-context.tsx
  *
- * Contexto global de trading — integração WebSocket real da Deriv.
+ * Usa o derivWs já existente em lib/api.ts — não cria um segundo WebSocket.
  *
- * Fluxo conforme documentação oficial:
- *  1. REST POST /trading/v1/options/accounts/{accountId}/otp  → URL WS autenticada
- *  2. new WebSocket(otpUrl)  → ligação autenticada (demo ou real)
- *  3. Subscreve: ticks_history (candles) + ticks (tempo real) + balance
- *  4. Dados de gráfico fluem via setChartData → chart-section lê via refs (zero re-renders extra)
- *  5. Dados de UI (saldo, trades, dígito) → setState controlado
+ * Responsabilidades:
+ *  - Subscrever ticks + candles em tempo real via derivWs
+ *  - Subscrever saldo em tempo real (balance subscribe)
+ *  - Subscrever transações (transaction subscribe) → histórico automático
+ *  - Expor troca de conta com reconexão WS
+ *  - Bot automático: proposal → buy → proposal_open_contract
  */
 
 import {
@@ -22,9 +22,11 @@ import {
   useCallback,
   ReactNode,
 } from 'react'
+import { derivWs, api, addLocalTrade, clearLocalTrades, type Account } from './api'
+import { useAuth } from './auth-context'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tipos exportados (consumidos pelos componentes)
+// Tipos
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface BarEntry {
@@ -35,7 +37,7 @@ export interface BarEntry {
 }
 
 export interface CandleData {
-  x: number   // timestamp ms
+  x: number
   o: number
   h: number
   l: number
@@ -103,7 +105,7 @@ interface TradingContextValue {
   botStatus: BotStatus
   startBot: () => void
   stopBot: () => void
-  buyContract: (params: BuyParams) => void
+  buyContract: (p: BuyParams) => void
   sellContract: (contractId: number) => void
 }
 
@@ -111,14 +113,9 @@ interface TradingContextValue {
 // Constantes
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BASE_REST      = 'https://api.derivws.com'
-const PUBLIC_WS_URL  = 'wss://api.derivws.com/trading/v1/options/ws/public'
-const DEFAULT_SYMBOL = '1HZ100V'
-const MAX_CANDLES    = 120
-const MAX_DIGIT_HIST = 1000
-const PING_MS        = 25_000
-const RECONNECT_BASE = 2_000
-const RECONNECT_MAX  = 30_000
+const DEFAULT_SYMBOL  = '1HZ100V'
+const MAX_CANDLES     = 120
+const MAX_DIGIT_HIST  = 1000
 
 const DEFAULT_STRATEGIES: Strategy[] = [
   { id: 'even', name: 'Digit Par',     contractType: 'DIGITEVEN', duration: 1, durationUnit: 't', stake: 1, symbol: DEFAULT_SYMBOL },
@@ -128,7 +125,7 @@ const DEFAULT_STRATEGIES: Strategy[] = [
 ]
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers puros
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 function getLastDigit(price: number): number {
@@ -151,7 +148,7 @@ function computeBarData(history: number[]): BarEntry[] {
   }))
 }
 
-function formatHora(epochSec: number): string {
+function toHora(epochSec: number): string {
   return new Date(epochSec * 1000).toLocaleTimeString('pt-PT', {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   })
@@ -174,477 +171,366 @@ export function useTrading(): TradingContextValue {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function TradingProvider({ children }: { children: ReactNode }) {
+  const { currentAccount, wsConnected } = useAuth()
 
-  // ── Refs internas — não causam re-render ─────────────────────────────────
-  const wsRef             = useRef<WebSocket | null>(null)
-  const pingRef           = useRef<ReturnType<typeof setInterval> | null>(null)
-  const reconnectRef      = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const reconnectAttempts = useRef(0)
-  const reqIdRef          = useRef(1)
-  const pendingRef        = useRef<Map<number, (d: unknown) => void>>(new Map())
-  const digitHistoryRef   = useRef<number[]>([])
-  const candleBufferRef   = useRef<CandleData[]>([])
-  const tickSubIdRef      = useRef<string | null>(null)
+  // ── Refs mutáveis (não causam re-render) ──────────────────────────────────
+  const digitHistRef      = useRef<number[]>([])
+  const candleBufRef      = useRef<CandleData[]>([])
+  const selectedTicksRef  = useRef(100)
+  const initialBalRef     = useRef<number | null>(null)
   const openContractRef   = useRef<{ contractId: number; subId?: string } | null>(null)
   const botTimerRef       = useRef<ReturnType<typeof setInterval> | null>(null)
   const mountedRef        = useRef(true)
-  const selectedTicksRef  = useRef(100)
-  const initialBalanceRef = useRef<number | null>(null)
-  const currentStrategyRef = useRef<Strategy | null>(DEFAULT_STRATEGIES[0])
+  const strategyRef       = useRef<Strategy | null>(DEFAULT_STRATEGIES[0])
+  // Cleanup functions para remover listeners do derivWs
+  const unsubsRef         = useRef<Array<() => void>>([])
 
-  // ── Estado React — causa re-render apenas nos componentes subscritos ──────
-  const [isConnected,     setIsConnected]     = useState(false)
-  const [balance,         setBalance]         = useState(0)
-  const [profit,          setProfit]          = useState(0)
-  const [wins,            setWins]            = useState(0)
-  const [losses,          setLosses]          = useState(0)
-  const [currency,        setCurrency]        = useState('USD')
-  const [currentPrice,    setCurrentPrice]    = useState(0)
-  const [lastDigit,       setLastDigit]       = useState(0)
-  const [chartData,       setChartData]       = useState<ChartData>({ barData: [], candleData: [], lastDigit: 0 })
-  const [selectedTicks,   _setSelectedTicks]  = useState(100)
-  const [trades,          setTrades]          = useState<Trade[]>([])
-  const [strategies]                          = useState<Strategy[]>(DEFAULT_STRATEGIES)
-  const [currentStrategy, _setCurrentStrategy] = useState<Strategy | null>(DEFAULT_STRATEGIES[0])
-  const [botStatus,       setBotStatus]       = useState<BotStatus>({ isRunning: false, currentStep: 'idle' })
+  // ── Estado React ──────────────────────────────────────────────────────────
+  const [balance,          setBalance]          = useState(0)
+  const [profit,           setProfit]           = useState(0)
+  const [wins,             setWins]             = useState(0)
+  const [losses,           setLosses]           = useState(0)
+  const [currency,         setCurrency]         = useState('USD')
+  const [currentPrice,     setCurrentPrice]     = useState(0)
+  const [lastDigit,        setLastDigit]        = useState(0)
+  const [chartData,        setChartData]        = useState<ChartData>({ barData: [], candleData: [], lastDigit: 0 })
+  const [selectedTicks,    _setSelectedTicks]   = useState(100)
+  const [trades,           setTrades]           = useState<Trade[]>([])
+  const [isLoadingTrades,  setIsLoadingTrades]  = useState(false)
+  const [strategies]                            = useState<Strategy[]>(DEFAULT_STRATEGIES)
+  const [currentStrategy,  _setCurrentStrategy] = useState<Strategy | null>(DEFAULT_STRATEGIES[0])
+  const [botStatus,        setBotStatus]        = useState<BotStatus>({ isRunning: false, currentStep: 'idle' })
+
+  // ── Setters com sincronização de ref ──────────────────────────────────────
 
   const setSelectedTicks = useCallback((n: number) => {
     selectedTicksRef.current = n
     _setSelectedTicks(n)
-    // Recalcular barras imediatamente com nova janela
-    const window  = digitHistoryRef.current.slice(-n)
-    const barData = computeBarData(window)
+    const barData = computeBarData(digitHistRef.current.slice(-n))
     setChartData(prev => ({ ...prev, barData }))
   }, [])
 
   const setCurrentStrategy = useCallback((s: Strategy) => {
-    currentStrategyRef.current = s
+    strategyRef.current = s
     _setCurrentStrategy(s)
   }, [])
 
-  // ── Envio WS com Promise e timeout ───────────────────────────────────────
+  // ── Remover todos os listeners activos ────────────────────────────────────
 
-  const send = useCallback((payload: Record<string, unknown>): Promise<unknown> => {
-    return new Promise((resolve, reject) => {
-      const ws = wsRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        return reject(new Error('WebSocket não está aberto'))
-      }
-      const id = reqIdRef.current++
-      payload.req_id = id
-      pendingRef.current.set(id, resolve)
-      ws.send(JSON.stringify(payload))
-      setTimeout(() => {
-        if (pendingRef.current.has(id)) {
-          pendingRef.current.delete(id)
-          reject(new Error(`Timeout req_id=${id}`))
-        }
-      }, 15_000)
-    })
+  const removeAllListeners = useCallback(() => {
+    unsubsRef.current.forEach(fn => fn())
+    unsubsRef.current = []
   }, [])
 
-  // ── Handler de mensagens WS ───────────────────────────────────────────────
+  // ── Inicializar subscrições de mercado via derivWs ────────────────────────
 
-  const onMessage = useCallback((evt: MessageEvent) => {
-    let msg: Record<string, unknown>
-    try { msg = JSON.parse(evt.data as string) } catch { return }
+  const initMarketSubs = useCallback(async () => {
+    if (!derivWs.isConnected) return
 
-    // Resolver promise pendente por req_id
-    const rid = msg.req_id as number | undefined
-    if (rid && pendingRef.current.has(rid)) {
-      pendingRef.current.get(rid)!(msg)
-      pendingRef.current.delete(rid)
-    }
+    // 1. Histórico de candles (1 min granularidade, últimas 120 velas)
+    try {
+      const res = await derivWs.getTicksHistory(DEFAULT_SYMBOL, MAX_CANDLES, 'candles', 60) as Record<string, unknown>
+      const raw = res?.candles as Array<Record<string, number>> | undefined
+      if (Array.isArray(raw)) {
+        const parsed: CandleData[] = raw.map(c => ({
+          x: c.epoch * 1000,
+          o: c.open,
+          h: c.high,
+          l: c.low,
+          c: c.close,
+        }))
+        candleBufRef.current = parsed.slice(-MAX_CANDLES)
+        setChartData(prev => ({ ...prev, candleData: candleBufRef.current.slice() }))
+      }
+    } catch (e) { console.warn('[Trading] ticks_history falhou:', e) }
 
-    const type = msg.msg_type as string
+    // 2. Ticks em tempo real
+    try {
+      await derivWs.subscribeTicks(DEFAULT_SYMBOL)
+    } catch (e) { console.warn('[Trading] subscribeTicks falhou:', e) }
 
-    // ── TICK EM TEMPO REAL ────────────────────────────────────────────────
-    if (type === 'tick') {
-      const tick  = msg.tick as Record<string, unknown>
+    // 3. Listener de ticks — actualiza gráfico sem re-render extra
+    const unsubTick = derivWs.on('tick', (raw: unknown) => {
+      const msg  = raw as Record<string, unknown>
+      const tick = msg.tick as Record<string, unknown> | undefined
+      if (!tick) return
+
       const price = tick.quote as number
       const epoch = tick.epoch as number
-      tickSubIdRef.current = tick.id as string
 
-      // Actualizar estado de preço e dígito
       setCurrentPrice(price)
       const digit = getLastDigit(price)
       setLastDigit(digit)
 
-      // Histórico de dígitos (mutação directa na ref)
-      const hist = digitHistoryRef.current
+      // Histórico de dígitos
+      const hist = digitHistRef.current
       hist.push(digit)
       if (hist.length > MAX_DIGIT_HIST) hist.shift()
 
-      // Barras com janela seleccionada
-      const windowSlice = hist.slice(-selectedTicksRef.current)
-      const barData     = computeBarData(windowSlice)
+      const barData = computeBarData(hist.slice(-selectedTicksRef.current))
 
-      // Candle do minuto actual (mutação directa na ref do buffer)
-      const buf      = candleBufferRef.current
+      // Candle do minuto actual
+      const buf      = candleBufRef.current
       const msNow    = epoch * 1000
       const minStart = Math.floor(msNow / 60_000) * 60_000
       const last     = buf[buf.length - 1]
 
       if (last && last.x === minStart) {
-        // Actualizar candle em curso (high/low/close)
         last.h = Math.max(last.h, price)
         last.l = Math.min(last.l, price)
         last.c = price
       } else {
-        // Novo minuto → novo candle
         buf.push({ x: minStart, o: price, h: price, l: price, c: price })
         if (buf.length > MAX_CANDLES) buf.shift()
       }
 
-      // Um único setState agrupa barras + candles + dígito
-      setChartData({
-        barData,
-        candleData: buf.slice(),   // cópia rasa — React detecta a mudança de referência
-        lastDigit: digit,
-      })
-      return
-    }
+      setChartData({ barData, candleData: buf.slice(), lastDigit: digit })
+    })
 
-    // ── HISTÓRICO DE CANDLES ──────────────────────────────────────────────
-    if (type === 'candles') {
-      const raw = msg.candles as Array<Record<string, number>> | undefined
-      if (!Array.isArray(raw)) return
-      const parsed: CandleData[] = raw.map(c => ({
-        x: c.epoch * 1000,
-        o: c.open,
-        h: c.high,
-        l: c.low,
-        c: c.close,
-      }))
-      candleBufferRef.current = parsed.slice(-MAX_CANDLES)
-      setChartData(prev => ({ ...prev, candleData: candleBufferRef.current.slice() }))
-      return
-    }
+    unsubsRef.current.push(unsubTick)
+  }, [])
 
-    // ── SALDO ─────────────────────────────────────────────────────────────
-    if (type === 'balance') {
-      const b = msg.balance as Record<string, unknown> | undefined
+  // ── Inicializar subscrições de conta (saldo + transações) ─────────────────
+
+  const initAccountSubs = useCallback(() => {
+    if (!derivWs.isConnected) return
+
+    // Listener de saldo em tempo real
+    const unsubBal = derivWs.on('balance', (raw: unknown) => {
+      const msg = raw as Record<string, unknown>
+      const b   = msg.balance as Record<string, unknown> | undefined
       if (!b) return
       const newBal = b.balance as number
       setCurrency((b.currency as string) ?? 'USD')
       setBalance(newBal)
-      if (initialBalanceRef.current === null) initialBalanceRef.current = newBal
-      setProfit(+(newBal - (initialBalanceRef.current ?? newBal)).toFixed(2))
-      return
-    }
+      if (initialBalRef.current === null) initialBalRef.current = newBal
+      setProfit(+(newBal - (initialBalRef.current ?? newBal)).toFixed(2))
+    })
 
-    // ── COMPRA CONFIRMADA ─────────────────────────────────────────────────
-    if (type === 'buy') {
-      if (msg.error) {
-        console.error('[WS] Erro na compra:', msg.error)
-        setBotStatus(prev => ({ ...prev, currentStep: 'idle' }))
-        return
+    // Listener de transações — adiciona trade ao histórico automaticamente
+    const unsubTx = derivWs.on('transaction', (raw: unknown) => {
+      const msg = raw as Record<string, unknown>
+      const tx  = msg.transaction as Record<string, unknown> | undefined
+      if (!tx) return
+
+      // Só registar quando é uma venda/fecho de contrato
+      const action = tx.action as string
+      if (action !== 'sell') return
+
+      const pnl    = (tx.amount as number) ?? 0
+      const epoch  = (tx.transaction_time as number) ?? Math.floor(Date.now() / 1000)
+      const trade: Trade = {
+        id:         (tx.transaction_id as number) ?? Date.now(),
+        hora:       toHora(epoch),
+        tipo:       (tx.contract_type as string) ?? (action),
+        tickFinal:  '—',
+        preco:      `$${Math.abs(pnl).toFixed(2)}`,
+        resultado:  +pnl.toFixed(2),
+        created_at: new Date(epoch * 1000).toISOString(),
       }
-      const buy = msg.buy as Record<string, unknown>
-      openContractRef.current = { contractId: buy.contract_id as number }
-      setBotStatus(prev => ({ ...prev, currentStep: 'contract_open' }))
-      return
-    }
+      setTrades(prev => [trade, ...prev].slice(0, 500))
+      addLocalTrade({
+        id:          trade.id as string,
+        hora:        trade.hora,
+        tipo:        trade.tipo,
+        tickFinal:   trade.tickFinal as string,
+        preco:       trade.preco,
+        resultado:   trade.resultado,
+        timestamp:   epoch * 1000,
+        contract_id: tx.contract_id as number,
+      })
+    })
 
-    // ── ACTUALIZAÇÕES DE CONTRATO ABERTO ──────────────────────────────────
-    if (type === 'proposal_open_contract') {
+    // Listener de contrato fechado — actualiza wins/losses e o trade com detalhe
+    const unsubPOC = derivWs.on('proposal_open_contract', (raw: unknown) => {
+      const msg = raw as Record<string, unknown>
       const poc = msg.proposal_open_contract as Record<string, unknown> | undefined
       if (!poc) return
 
-      // Guardar subscription id na primeira mensagem
+      // Guardar subId
       if (poc.id && openContractRef.current && !openContractRef.current.subId) {
         openContractRef.current.subId = poc.id as string
       }
 
       const status = poc.status as string
-      const isClosed = status === 'sold' || status === 'won' || status === 'lost' || !!poc.is_sold
+      const closed = status === 'sold' || status === 'won' || status === 'lost' || !!poc.is_sold
+      if (!closed) return
 
-      if (!isClosed) return
-
-      const pnl   = (poc.profit as number) ?? 0
-      const isWin = pnl >= 0
-      const sellP = ((poc.sell_price ?? poc.bid_price ?? 0) as number)
-      const buyP  = ((poc.buy_price ?? 0) as number)
-      const epoch = ((poc.sell_time ?? poc.date_expiry ?? Math.floor(Date.now() / 1000)) as number)
+      const pnl    = (poc.profit as number) ?? 0
+      const isWin  = pnl >= 0
+      const sellP  = ((poc.sell_price ?? poc.bid_price ?? 0) as number)
+      const buyP   = ((poc.buy_price ?? 0) as number)
+      const epoch  = ((poc.sell_time ?? poc.date_expiry ?? Math.floor(Date.now() / 1000)) as number)
+      const exitTick = (poc.exit_tick ?? 0) as number
 
       const trade: Trade = {
         id:         poc.contract_id as number,
-        hora:       formatHora(epoch),
+        hora:       toHora(epoch),
         tipo:       (poc.contract_type as string) ?? '—',
-        tickFinal:  getLastDigit((poc.exit_tick ?? 0) as number),
+        tickFinal:  getLastDigit(exitTick),
         preco:      `$${sellP.toFixed(2)}`,
         resultado:  +pnl.toFixed(2),
         amount:     +buyP.toFixed(2),
         created_at: new Date(((poc.purchase_time as number) ?? epoch) * 1000).toISOString(),
       }
 
-      setTrades(prev => [trade, ...prev].slice(0, 500))
+      // Substituir ou adicionar ao histórico (evitar duplicado da transação)
+      setTrades(prev => {
+        const exists = prev.findIndex(t => t.id === trade.id)
+        if (exists >= 0) {
+          const next = [...prev]
+          next[exists] = trade
+          return next
+        }
+        return [trade, ...prev].slice(0, 500)
+      })
+
       if (isWin) setWins(w => w + 1)
       else       setLosses(l => l + 1)
 
-      // Cancelar subscrição do contrato fechado
+      // Cancelar subscrição do contrato
       if (openContractRef.current?.subId) {
-        send({ forget: openContractRef.current.subId }).catch(() => {})
+        derivWs.send({ forget: openContractRef.current.subId }).catch(() => {})
       }
       openContractRef.current = null
       setBotStatus(prev => ({ ...prev, currentStep: 'contract_closed' }))
 
-      // Voltar a 'analyzing' se o bot ainda estiver activo
       setTimeout(() => {
         if (mountedRef.current) {
-          setBotStatus(prev =>
-            prev.isRunning ? { ...prev, currentStep: 'analyzing' } : prev
-          )
+          setBotStatus(prev => prev.isRunning ? { ...prev, currentStep: 'analyzing' } : prev)
         }
       }, 1_200)
-    }
-  }, [send])
+    })
 
-  // ── Subscrições após ligar ────────────────────────────────────────────────
+    unsubsRef.current.push(unsubBal, unsubTx, unsubPOC)
+  }, [])
 
-  const initSubscriptions = useCallback(async () => {
-    // Histórico de candles (1 minuto de granularidade)
+  // ── Carregar histórico de trades do servidor ──────────────────────────────
+
+  const loadTradeHistory = useCallback(async () => {
+    setIsLoadingTrades(true)
     try {
-      await send({
-        ticks_history: DEFAULT_SYMBOL,
-        end:           'latest',
-        count:         MAX_CANDLES,
-        style:         'candles',
-        granularity:   60,
-      })
-    } catch (e) { console.warn('[WS] ticks_history falhou:', e) }
-
-    // Ticks em tempo real
-    try {
-      if (tickSubIdRef.current) {
-        await send({ forget: tickSubIdRef.current }).catch(() => {})
-        tickSubIdRef.current = null
+      const { data } = await api.getTrades()
+      if (Array.isArray(data) && data.length > 0) {
+        const mapped: Trade[] = data.map(t => ({
+          id:         t.id,
+          hora:       t.hora,
+          tipo:       t.tipo,
+          tickFinal:  t.tickFinal,
+          preco:      t.preco,
+          resultado:  t.resultado,
+          created_at: t.timestamp ? new Date(t.timestamp).toISOString() : undefined,
+        }))
+        setTrades(mapped)
       }
-      await send({ ticks: DEFAULT_SYMBOL, subscribe: 1 })
-    } catch (e) { console.warn('[WS] ticks subscribe falhou:', e) }
-  }, [send])
-
-  // ── Ligação WebSocket ─────────────────────────────────────────────────────
-
-  const connect = useCallback(async () => {
-    if (reconnectRef.current) clearTimeout(reconnectRef.current)
-
-    // Fechar WS anterior limpo
-    if (wsRef.current) {
-      wsRef.current.onclose = null
-      wsRef.current.onerror = null
-      wsRef.current.onmessage = null
-      wsRef.current.close()
-      wsRef.current = null
+    } catch (e) {
+      console.warn('[Trading] loadTradeHistory falhou:', e)
+    } finally {
+      setIsLoadingTrades(false)
     }
+  }, [])
 
-    // Tentar ligação autenticada via OTP; fallback para público
-    let wsUrl = PUBLIC_WS_URL
-    const token     = typeof window !== 'undefined'
-      ? (localStorage.getItem('deriv_access_token') ?? localStorage.getItem('token'))
-      : null
-    const accountId = typeof window !== 'undefined'
-      ? localStorage.getItem('deriv_account_id')
-      : null
-
-    if (token && accountId) {
-      try {
-        const res = await fetch(
-          `${BASE_REST}/trading/v1/options/accounts/${accountId}/otp`,
-          {
-            method:  'POST',
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'Deriv-App-ID':  process.env.NEXT_PUBLIC_DERIV_APP_ID ?? '',
-              'Content-Type':  'application/json',
-            },
-          }
-        )
-        if (res.ok) {
-          const json = await res.json()
-          const url  = json?.data?.url as string | undefined
-          if (url) {
-            wsUrl = url
-            console.log('[WS] Ligação autenticada obtida')
-          }
-        } else {
-          console.warn('[WS] OTP retornou', res.status, '— usando endpoint público')
-        }
-      } catch (e) {
-        console.warn('[WS] Erro ao obter OTP:', e, '— usando endpoint público')
-      }
-    } else {
-      console.log('[WS] Sem credenciais — usando endpoint público (apenas dados de mercado)')
-    }
-
-    const ws = new WebSocket(wsUrl)
-    wsRef.current = ws
-
-    ws.onopen = async () => {
-      if (!mountedRef.current) return
-      console.log('[WS] Ligado com sucesso:', wsUrl)
-      setIsConnected(true)
-      reconnectAttempts.current = 0
-
-      // Ping a cada 25 s para manter a ligação viva
-      if (pingRef.current) clearInterval(pingRef.current)
-      pingRef.current = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ ping: 1, req_id: reqIdRef.current++ }))
-        }
-      }, PING_MS)
-
-      // Subscrever saldo apenas se autenticado
-      if (wsUrl !== PUBLIC_WS_URL) {
-        try {
-          await send({ balance: 1, subscribe: 1 })
-        } catch (e) { console.warn('[WS] balance subscribe falhou:', e) }
-      }
-
-      // Subscrições de mercado
-      await initSubscriptions()
-    }
-
-    ws.onmessage = onMessage
-
-    ws.onerror = (e) => {
-      console.warn('[WS] Erro de socket:', e)
-    }
-
-    ws.onclose = (ev) => {
-      if (!mountedRef.current) return
-      console.warn(`[WS] Fechado — código ${ev.code}: ${ev.reason}`)
-      setIsConnected(false)
-      if (pingRef.current) clearInterval(pingRef.current)
-
-      // Reconexão com exponential back-off
-      const delay = Math.min(RECONNECT_BASE * 2 ** reconnectAttempts.current, RECONNECT_MAX)
-      reconnectAttempts.current++
-      console.log(`[WS] Reconectar em ${delay}ms (tentativa ${reconnectAttempts.current})`)
-      reconnectRef.current = setTimeout(() => {
-        if (mountedRef.current) connect()
-      }, delay)
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [send, initSubscriptions, onMessage])
-  // Nota: connect não inclui connect no array de deps para evitar loop infinito
-
-  // ── Montagem / desmontagem ────────────────────────────────────────────────
+  // ── Inicializar quando WS fica conectado ──────────────────────────────────
 
   useEffect(() => {
     mountedRef.current = true
-    connect()
+
+    if (wsConnected) {
+      removeAllListeners()
+      initAccountSubs()
+      initMarketSubs()
+      loadTradeHistory()
+    }
+
     return () => {
       mountedRef.current = false
-      if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close() }
-      if (pingRef.current)    clearInterval(pingRef.current)
-      if (reconnectRef.current) clearTimeout(reconnectRef.current)
-      if (botTimerRef.current)  clearInterval(botTimerRef.current)
+      removeAllListeners()
+      if (botTimerRef.current) clearInterval(botTimerRef.current)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // Apenas na montagem
+  }, [wsConnected, initAccountSubs, initMarketSubs, loadTradeHistory, removeAllListeners])
 
-  // Reconectar quando accountId muda no localStorage (troca de conta)
+  // Quando a conta muda — resetar saldo inicial para novo cálculo de profit
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === 'deriv_account_id' || e.key === 'deriv_access_token') {
-        console.log('[WS] Credenciais alteradas — a religar...')
-        reconnectAttempts.current = 0
-        connect()
-      }
+    if (currentAccount) {
+      initialBalRef.current = null
+      setBalance(currentAccount.balance ?? 0)
+      setCurrency(currentAccount.currency ?? 'USD')
+      setProfit(0)
+      setWins(0)
+      setLosses(0)
+      setTrades([])
+      digitHistRef.current   = []
+      candleBufRef.current   = []
     }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [connect])
+  }, [currentAccount?.account_id])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Operações de trading ──────────────────────────────────────────────────
+  // ── Trading ───────────────────────────────────────────────────────────────
 
   const buyContract = useCallback(async (params: BuyParams) => {
     setBotStatus(prev => ({ ...prev, currentStep: 'analyzing' }))
     try {
-      // 1. Obter proposta de preço
-      const propRes = await send({
-        proposal:          1,
+      // 1. Proposta
+      const propRes = await derivWs.getProposal({
         amount:            params.stake,
         basis:             'stake',
         contract_type:     params.contractType,
         currency:          'USD',
         duration:          params.duration,
-        duration_unit:     params.durationUnit,
+        duration_unit:     params.durationUnit as 's' | 'm' | 'h' | 'd' | 't',
         underlying_symbol: params.symbol ?? DEFAULT_SYMBOL,
-      }) as Record<string, unknown>
+      })
+      const proposal   = propRes.proposal
+      const proposalId = proposal.id
+      const askPrice   = proposal.ask_price
 
-      if (propRes.error) {
-        console.error('[WS] Erro na proposta:', propRes.error)
-        setBotStatus(prev => ({ ...prev, currentStep: 'idle' }))
-        return
-      }
-
-      const proposal   = propRes.proposal as Record<string, unknown>
-      const proposalId = proposal.id as string
-      const askPrice   = proposal.ask_price as number
-
-      // 2. Comprar o contrato
-      const buyRes = await send({ buy: proposalId, price: askPrice }) as Record<string, unknown>
-
+      // 2. Comprar
+      const buyRes = await derivWs.buyContract(proposalId, askPrice) as Record<string, unknown>
       if (buyRes.error) {
-        console.error('[WS] Erro na compra:', buyRes.error)
+        console.error('[Trading] Erro na compra:', buyRes.error)
         setBotStatus(prev => ({ ...prev, currentStep: 'idle' }))
         return
       }
-
       const buy        = buyRes.buy as Record<string, unknown>
       const contractId = buy.contract_id as number
       openContractRef.current = { contractId }
 
-      // 3. Subscrever actualizações do contrato
-      const pocRes = await send({
-        proposal_open_contract: 1,
-        contract_id:            contractId,
-        subscribe:              1,
-      }) as Record<string, unknown>
-
-      const poc = pocRes.proposal_open_contract as Record<string, unknown> | undefined
-      if (poc?.id && openContractRef.current) {
-        openContractRef.current.subId = poc.id as string
-      }
-
+      // 3. Subscrever actualizações
+      await derivWs.subscribeOpenContract(contractId)
       setBotStatus(prev => ({ ...prev, currentStep: 'contract_open' }))
     } catch (e) {
-      console.error('[WS] buyContract falhou:', e)
+      console.error('[Trading] buyContract falhou:', e)
       setBotStatus(prev => ({ ...prev, currentStep: 'idle' }))
     }
-  }, [send])
+  }, [])
 
   const sellContract = useCallback(async (contractId: number) => {
     try {
-      await send({ sell: contractId, price: 0 })
+      await derivWs.sellContract(contractId, 0)
     } catch (e) {
-      console.error('[WS] sellContract falhou:', e)
+      console.error('[Trading] sellContract falhou:', e)
     }
-  }, [send])
+  }, [])
 
   // ── Bot automático ────────────────────────────────────────────────────────
 
   const startBot = useCallback(() => {
-    const strategy = currentStrategyRef.current
-    if (!strategy) return
+    const s = strategyRef.current
+    if (!s) return
     setBotStatus({ isRunning: true, currentStep: 'analyzing' })
 
     const runOnce = () => {
-      if (!mountedRef.current) return
-      if (openContractRef.current) return   // já há contrato em curso
+      if (!mountedRef.current || !strategyRef.current) return
+      if (openContractRef.current) return
       buyContract({
-        contractType: strategy.contractType,
-        duration:     strategy.duration,
-        durationUnit: strategy.durationUnit,
-        stake:        strategy.stake,
-        symbol:       strategy.symbol,
+        contractType: strategyRef.current.contractType,
+        duration:     strategyRef.current.duration,
+        durationUnit: strategyRef.current.durationUnit,
+        stake:        strategyRef.current.stake,
+        symbol:       strategyRef.current.symbol,
       })
     }
 
-    runOnce()   // operação imediata
-    // Fallback: se contrato não fechar em 90 s, tenta de novo
+    runOnce()
     if (botTimerRef.current) clearInterval(botTimerRef.current)
     botTimerRef.current = setInterval(runOnce, 90_000)
   }, [buyContract])
@@ -652,25 +538,25 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   const stopBot = useCallback(async () => {
     if (botTimerRef.current) { clearInterval(botTimerRef.current); botTimerRef.current = null }
     setBotStatus({ isRunning: false, currentStep: 'idle' })
-    if (openContractRef.current) {
-      await sellContract(openContractRef.current.contractId)
-    }
+    if (openContractRef.current) await sellContract(openContractRef.current.contractId)
   }, [sellContract])
 
   // ── Limpar histórico ──────────────────────────────────────────────────────
 
-  const clearTrades = useCallback(() => {
+  const clearTrades = useCallback(async () => {
     setTrades([])
     setWins(0)
     setLosses(0)
     setProfit(0)
-    initialBalanceRef.current = balance
+    initialBalRef.current = balance
+    clearLocalTrades()
+    try { await api.clearTrades() } catch { /* ignora */ }
   }, [balance])
 
   // ── Value ─────────────────────────────────────────────────────────────────
 
   const value: TradingContextValue = {
-    isConnected,
+    isConnected: wsConnected,
     balance,
     profit,
     wins,
@@ -682,7 +568,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     selectedTicks,
     setSelectedTicks,
     trades,
-    isLoadingTrades: false,
+    isLoadingTrades,
     clearTrades,
     strategies,
     currentStrategy,
