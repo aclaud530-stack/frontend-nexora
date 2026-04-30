@@ -36,9 +36,9 @@ export function TradesTable() {
   }
 
   return (
-    <div className="bg-[#1a1f2e] rounded-xl border-2 border-[#2a3142] overflow-hidden shadow-lg flex flex-col h-full">
+    <div className="bg-[#131825] rounded-xl border border-[#2a3142] overflow-hidden flex flex-col h-full">
       {/* Tabs e ícones */}
-      <div className="flex items-center justify-between px-3 sm:px-4 py-2.5 border-b-2 border-[#2a3142] shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a3142] shrink-0">
         <div className="flex gap-4 sm:gap-6">
           <button
             onClick={() => setActiveTab('trader')}
@@ -89,8 +89,8 @@ export function TradesTable() {
           </div>
         ) : (
           <table className="w-full">
-            <thead className="sticky top-0 bg-[#1a1f2e] z-10">
-              <tr className="text-gray-400 text-xs sm:text-sm border-b-2 border-[#2a3142]">
+            <thead className="sticky top-0 bg-[#131825] z-10">
+              <tr className="text-gray-400 text-xs border-b border-[#2a3142]">
                 <th className="text-left px-2 sm:px-3 py-2 font-semibold">Hora</th>
                 <th className="text-left px-2 sm:px-3 py-2 font-semibold">Tipo</th>
                 <th className="text-left px-2 sm:px-3 py-2 font-semibold hidden sm:table-cell">Tick Final</th>
