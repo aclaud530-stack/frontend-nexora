@@ -90,8 +90,18 @@ export function ControlsSection() {
     else await startBot()
   }
 
-  const accountLabel = currentAccount?.is_virtual ? 'Conta Demo' : 'Conta Real'
-  const accountColor = currentAccount?.is_virtual ? '#2ec7ff' : '#22c55e'
+  // Só mostra label/cor quando há uma conta selecionada vinda da API
+  const accountLabel = currentAccount == null
+    ? 'Selecionar'
+    : currentAccount.is_virtual
+      ? 'Conta Demo'
+      : 'Conta Real'
+
+  const accountColor = currentAccount == null
+    ? '#6b7280'                                     // cinza — sem conta
+    : currentAccount.is_virtual
+      ? '#2ec7ff'                                   // azul — demo
+      : '#22c55e'                                   // verde — real
 
   return (
     <div className="space-y-4">
@@ -113,20 +123,33 @@ export function ControlsSection() {
 
           {showAccountDropdown && (
             <div className="absolute top-full left-0 right-0 mt-2 bg-[#1e2535] rounded-xl shadow-xl border border-[#2a3142] py-1 z-50">
-              {accounts.map((account) => (
-                <button
-                  key={account.account_id}
-                  onClick={() => {
-                    setCurrentAccount(account)
-                    setShowAccountDropdown(false)
-                  }}
-                  className={`w-full px-4 py-2.5 text-left text-sm hover:bg-[#2a3142] transition-colors ${
-                    currentAccount?.account_id === account.account_id ? 'text-[#22c55e]' : 'text-white'
-                  }`}
-                >
-                  {account.is_virtual ? 'Demo' : 'Real'} - ${Number(account.balance ?? 0).toFixed(2)}
-                </button>
-              ))}
+              {accounts.length === 0 ? (
+                // API não conectada ou sem contas — mostra mensagem
+                <p className="px-4 py-3 text-xs text-gray-500 text-center">
+                  Nenhuma conta disponível
+                </p>
+              ) : (
+                accounts.map((account) => (
+                  <button
+                    key={account.account_id}
+                    onClick={() => {
+                      setCurrentAccount(account)
+                      setShowAccountDropdown(false)
+                    }}
+                    className={`w-full px-4 py-2.5 text-left text-sm hover:bg-[#2a3142] transition-colors ${
+                      currentAccount?.account_id === account.account_id
+                        ? 'text-[#22c55e]'
+                        : 'text-white'
+                    }`}
+                  >
+                    {account.is_virtual ? 'Conta Demo' : 'Conta Real'}
+                    {' '}
+                    <span className="text-gray-400 text-xs">
+                      — ${Number(account.balance ?? 0).toFixed(2)}
+                    </span>
+                  </button>
+                ))
+              )}
             </div>
           )}
         </div>
@@ -217,7 +240,7 @@ export function ControlsSection() {
               className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500 ease-out"
               style={{ width: `${animatedProgress}%` }}
             />
-            
+
             {/* Círculos nos pontos */}
             {steps.map((_, index) => {
               const position = (index / (steps.length - 1)) * 100
