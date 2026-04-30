@@ -252,7 +252,6 @@ function CurrentDigit({ digit }: { digit: number | null }) {
           fontFamily: 'monospace',
           lineHeight: 1,
           color: digit === null ? '#2a3142' : '#22c55e',
-          transition: 'color 0.08s ease',
           transform: flash ? 'scale(1.25)' : 'scale(1)',
           transition: 'transform 0.12s cubic-bezier(0.34,1.56,0.64,1), color 0.08s ease',
           display: 'inline-block',
