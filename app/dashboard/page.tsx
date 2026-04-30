@@ -36,7 +36,7 @@ function DashboardLoader() {
           backgroundClip: 'text',
         }}
       >
-        NEXORA
+        NEXORA FOREX
       </div>
 
       {/* Spinner duplo */}
@@ -150,7 +150,7 @@ export default function TradingDashboard() {
               backgroundClip: 'text',
             }}
           >
-            NEXORA
+            NEXORA FOREX
           </span>
 
           {/* Indicador de conexão WS no header */}
