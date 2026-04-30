@@ -1,7 +1,7 @@
 'use client'
 
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react'
-import { api, Account, derivWs } from './api'
+import { api, Account } from './api'
 
 interface AuthContextType {
   isAuthenticated: boolean
@@ -11,7 +11,6 @@ interface AuthContextType {
   setCurrentAccount: (account: Account) => Promise<void>
   logout: () => Promise<void>
   refreshAccounts: () => Promise<void>
-  wsConnected: boolean
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
@@ -21,42 +20,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true)
   const [accounts, setAccounts] = useState<Account[]>([])
   const [currentAccount, setCurrentAccountState] = useState<Account | null>(null)
-  const [wsConnected, setWsConnected] = useState(false)
-  const connecting = useRef(false)
-
-  const connectWS = useCallback(async (accountId: string) => {
-    if (connecting.current) return
-    connecting.current = true
-
-    try {
-      const { data } = await api.getOTP(accountId)
-
-      if (!data?.wsUrl) throw new Error('OTP sem wsUrl')
-
-      await derivWs.connect(data.wsUrl)
-      setWsConnected(true)
-
-      await derivWs.subscribeBalance()
-      await derivWs.subscribeTransaction()
-
-      derivWs.on('disconnected', () => setWsConnected(false))
-
-    } catch (error) {
-      console.error('[Auth] WS connect failed, tentando público:', error)
-      setWsConnected(false)
-      try {
-        await derivWs.connect()
-        setWsConnected(true)
-        derivWs.on('disconnected', () => setWsConnected(false))
-      } catch {
-        console.error('[Auth] Public WS also failed')
-      }
-    } finally {
-      connecting.current = false
-    }
-  }, [])
+  const initialCheckDone = useRef(false)
 
   const checkAuth = useCallback(async () => {
+    if (initialCheckDone.current) return
+    initialCheckDone.current = true
+
     const token = localStorage.getItem('token')
 
     if (!token) {
@@ -79,8 +48,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setCurrentAccountState(active || null)
       setIsAuthenticated(true)
 
-      if (active) connectWS(active.account_id)
-
     } catch (error) {
       console.error('[Auth] checkAuth failed:', error)
 
@@ -95,11 +62,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false)
     }
-  }, [connectWS])
+  }, [])
 
   useEffect(() => {
     checkAuth()
-    return () => { derivWs.disconnect() }
   }, [checkAuth])
 
   const setCurrentAccount = async (account: Account) => {
@@ -111,15 +77,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (e) {
       console.warn('[Auth] switchAccount REST failed:', e)
     }
-
-    derivWs.disconnect()
-    setWsConnected(false)
-    await connectWS(account.account_id)
   }
 
   const logout = async () => {
-    derivWs.disconnect()
-    setWsConnected(false)
     await api.logout()
     setIsAuthenticated(false)
     setAccounts([])
@@ -149,7 +109,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setCurrentAccount,
       logout,
       refreshAccounts,
-      wsConnected,
     }}>
       {children}
     </AuthContext.Provider>
