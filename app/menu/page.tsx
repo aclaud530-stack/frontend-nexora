@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth-context'
+import { useTrading } from '@/lib/trading-context'
 import { useLoader } from '@/components/loader'
 import { api } from '@/lib/api'
 import {
@@ -90,6 +91,7 @@ Para questões, contacte-nos via WhatsApp: +${WHATSAPP}`
 export default function MenuPage() {
   const router = useRouter()
   const { currentAccount, logout } = useAuth()
+  const { disconnect } = useTrading()
   const { show, complete, hide } = useLoader()
   const [onlineCount, setOnlineCount] = useState(generateOnlineCount())
   const [isAdmin, setIsAdmin] = useState(false)
@@ -130,7 +132,11 @@ export default function MenuPage() {
   }
 
   const goBack = () => { show('A carregar...'); router.push('/dashboard') }
-  const handleLogout = async () => { show('A sair...'); await logout() }
+  const handleLogout = async () => { 
+    show('A sair...')
+    disconnect() // Desconectar WebSocket antes de logout
+    await logout() 
+  }
   const navigateTo = (path: string) => { show('A carregar...'); router.push(path) }
 
   const MenuItem = ({
