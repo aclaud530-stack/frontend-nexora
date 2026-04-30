@@ -1,9 +1,7 @@
 'use client'
 
 import { useTrading } from '@/lib/trading-context'
-import { useAuth } from '@/lib/auth-context'
-import { useEffect, useState, useRef, useCallback } from 'react'
-import { Account } from '@/lib/api'
+import { useEffect, useState, useRef } from 'react'
 
 // ── Animação de número com easing cúbico ──────────────────────────────────────
 
@@ -31,58 +29,21 @@ function useAnimatedNumber(target: number, duration = 650) {
   return value
 }
 
-// ── Ícones ────────────────────────────────────────────────────────────────────
-
-function IconChevron({ open }: { open: boolean }) {
-  return (
-    <svg width="10" height="10" viewBox="0 0 10 10" fill="none"
-      className={`transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
-    >
-      <path d="M2 3.5l3 3 3-3" stroke="currentColor" strokeWidth="1.5"
-        strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-function IconRefresh({ spinning }: { spinning: boolean }) {
-  return (
-    <svg width="11" height="11" viewBox="0 0 11 11" fill="none"
-      className={spinning ? 'animate-spin' : ''}
-    >
-      <path d="M9.5 5.5A4 4 0 1 1 5.5 1.5a4 4 0 0 1 2.83 1.17L9.5 4"
-        stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-      <path d="M8 4h1.5V2.5" stroke="currentColor" strokeWidth="1.3"
-        strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-function IconSwitch() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-      <path d="M1 3.5h10M8 1.5l2.5 2L8 5.5" stroke="currentColor" strokeWidth="1.3"
-        strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M11 8.5H1M4 6.5 1.5 8.5 4 10.5" stroke="currentColor" strokeWidth="1.3"
-        strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
 // ── BalanceCard ───────────────────────────────────────────────────────────────
 
 export function BalanceCard() {
   const { balance, profit, wins, losses, currency, loading } = useTrading()
-  const [isSwitching, setIsSwitching] = useState(false)
 
   const displayBalance = useAnimatedNumber(balance, 700)
   const displayProfit  = useAnimatedNumber(profit,  700)
 
   const isProfit = profit >= 0
-  const total    = wins + losses
-  const winRate  = total > 0 ? Math.round((wins / total) * 100) : null
 
   return (
     <div className="relative rounded-xl overflow-hidden border-2 border-[#2a3142] shadow-lg"
       style={{ background: 'linear-gradient(135deg, #0d1117 0%, #1a1f2e 100%)' }}
     >
-      {/* Loader inicial — primeiro tick ainda não chegou */}
+      {/* Loader inicial */}
       {loading && (
         <div className="absolute inset-0 z-20 flex items-center justify-center rounded-xl
           bg-[#0d1117]/80 backdrop-blur-sm">
@@ -97,29 +58,11 @@ export function BalanceCard() {
         </div>
       )}
 
-      {/* Overlay de troca de conta */}
-      {isSwitching && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center rounded-xl
-          bg-[#0d1117]/80 backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-2">
-            <div className="relative w-8 h-8">
-              <div className="absolute inset-0 rounded-full border-2 border-[#2ec7ff]/20" />
-              <div className="absolute inset-0 rounded-full border-2 border-transparent
-                border-t-[#2ec7ff] animate-spin" />
-            </div>
-            <span className="text-[#2ec7ff] text-[9px] font-bold uppercase tracking-widest">
-              A trocar…
-            </span>
-          </div>
-        </div>
-      )}
-
       <div className="flex">
         {/* Saldo */}
         <div className="flex-1 p-4 bg-[#0d1117] border-r border-[#2a3142]">
-          <div className="flex items-center justify-between mb-2">
+          <div className="mb-2">
             <p className="text-gray-400 text-xs font-medium">Saldo</p>
-            <AccountSwitcherButton onSwitching={setIsSwitching} />
           </div>
           <p className="text-white text-xl sm:text-2xl font-bold tracking-tight tabular-nums">
             <span className="text-gray-500 text-base">$</span>{' '}
@@ -135,7 +78,7 @@ export function BalanceCard() {
             <span className="text-base opacity-70">$</span>{' '}
             {displayProfit.toFixed(2)}
           </p>
-          
+
           {/* Operações inline */}
           <div className="flex items-center gap-1 mt-2 text-gray-400 text-xs">
             <span>Operações</span>
