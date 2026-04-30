@@ -9,7 +9,7 @@
  * - Heartbeat / ping-pong para detetar conexões mortas
  * - Fila de mensagens offline — enviadas após reconexão
  * - Dados do gráfico de barras calculados sem bloquear o render thread
- * - Limite de candles para evitar memory leaks
+ * - Método de desconexão explícito para logout
  */
 
 import {
@@ -29,14 +29,6 @@ export interface BarEntry {
   percentage:  number
   isHighlight: boolean
   isLow:       boolean
-}
-
-export interface Candle {
-  x: number   // timestamp ms
-  o: number
-  h: number
-  l: number
-  c: number
 }
 
 export interface Trade {
@@ -60,7 +52,6 @@ export interface BotStatus {
 
 export interface ChartData {
   barData:    BarEntry[]
-  candleData: Candle[]
   lastDigit:  number
 }
 
@@ -88,6 +79,9 @@ interface TradingContextValue {
   botStatus:           BotStatus
   startBot:            () => Promise<void>
   stopBot:             () => Promise<void>
+
+  /** Desconecta o WebSocket — usado no logout */
+  disconnect:     () => void
 }
 
 const TradingContext = createContext<TradingContextValue | undefined>(undefined)
@@ -107,7 +101,6 @@ const RECONNECT_BASE_MS   = 1_000
 const RECONNECT_MAX_MS    = 30_000
 const HEARTBEAT_INTERVAL  = 20_000
 const HEARTBEAT_TIMEOUT   = 10_000
-const MAX_CANDLES         = 500
 const MAX_DIGIT_HISTORY   = 1_000
 
 // ── Utilitários ───────────────────────────────────────────────────────────────
@@ -130,25 +123,6 @@ function computeBarData(digits: number[], windowSize: number): BarEntry[] {
     isHighlight: pct === max,
     isLow:       pct === min,
   }))
-}
-
-function buildCandles(ticks: { epoch: number; price: number }[]): Candle[] {
-  const map = new Map<number, { o: number; h: number; l: number; c: number }>()
-  ticks.forEach(({ epoch, price }) => {
-    const minute = Math.floor(epoch / 60) * 60 * 1000
-    const existing = map.get(minute)
-    if (!existing) {
-      map.set(minute, { o: price, h: price, l: price, c: price })
-    } else {
-      existing.h = Math.max(existing.h, price)
-      existing.l = Math.min(existing.l, price)
-      existing.c = price
-    }
-  })
-  return Array.from(map.entries())
-    .sort(([a], [b]) => a - b)
-    .slice(-MAX_CANDLES)
-    .map(([x, v]) => ({ x, ...v }))
 }
 
 // ── Obter URL WebSocket autenticado via OTP ───────────────────────────────────
@@ -216,7 +190,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   const retryCount       = useRef(0)
   const messageQueue     = useRef<string[]>([])
   const digitHistory     = useRef<number[]>([])
-  const tickHistory      = useRef<{ epoch: number; price: number }[]>([])
   const selectedTicksRef = useRef(selectedTicks)
   const mountedRef       = useRef(true)
   // Guardamos o proposalId pendente para uso no bot
@@ -280,7 +253,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     if (msg.msg_type === 'tick' && msg.tick) {
       const tick  = msg.tick as { quote: number; epoch: number }
       const price = tick.quote
-      const epoch = tick.epoch
 
       const priceStr = price.toFixed(2)
       const digit    = parseInt(priceStr[priceStr.length - 1], 10)
@@ -288,10 +260,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       digitHistory.current.push(digit)
       if (digitHistory.current.length > MAX_DIGIT_HISTORY)
         digitHistory.current = digitHistory.current.slice(-MAX_DIGIT_HISTORY)
-
-      tickHistory.current.push({ epoch, price })
-      if (tickHistory.current.length > MAX_CANDLES * 60)
-        tickHistory.current = tickHistory.current.slice(-MAX_CANDLES * 60)
 
       if (!mountedRef.current) return
 
@@ -301,18 +269,15 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       const w = selectedTicksRef.current
       queueMicrotask(() => {
         if (!mountedRef.current) return
-        const barData    = computeBarData(digitHistory.current, w)
-        const candleData = buildCandles(tickHistory.current)
-        setChartData({ barData, candleData, lastDigit: digit })
+        const barData = computeBarData(digitHistory.current, w)
+        setChartData({ barData, lastDigit: digit })
       })
     }
 
-    // Histórico de ticks
+    // Histórico de ticks (para popular o gráfico inicial)
     if (msg.msg_type === 'history' && msg.history) {
       const h = msg.history as { prices: number[]; times: number[] }
-      const ticks = h.prices.map((price, i) => ({ price, epoch: h.times[i] }))
-      tickHistory.current = ticks
-      ticks.forEach(({ price }) => {
+      h.prices.forEach((price) => {
         const s = price.toFixed(2)
         digitHistory.current.push(parseInt(s[s.length - 1], 10))
       })
@@ -537,6 +502,21 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     setProfit(0)
   }, [])
 
+  // ── Desconexão explícita (para logout) ─────────────────────────────────────
+  const disconnect = useCallback(() => {
+    mountedRef.current = false
+    stopHeartbeat()
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.close(1000, 'logout')
+      wsRef.current = null
+    }
+    setIsConnected(false)
+    digitHistory.current = []
+    messageQueue.current = []
+  }, [stopHeartbeat])
+
   // ── Valor do contexto ──────────────────────────────────────────────────────
   const value: TradingContextValue = {
     balance,
@@ -559,6 +539,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     botStatus,
     startBot,
     stopBot,
+    disconnect,
   }
 
   return (
