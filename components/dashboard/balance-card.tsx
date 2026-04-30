@@ -1,9 +1,9 @@
 'use client'
 
 import { useTrading } from '@/lib/trading-context'
-import { useAuth }    from '@/lib/auth-context'
+import { useAuth } from '@/lib/auth-context'
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { Account }    from '@/lib/api'
+import { Account } from '@/lib/api'
 
 // ── Animação de número com easing cúbico ──────────────────────────────────────
 
@@ -251,50 +251,33 @@ export function BalanceCard() {
 
       <div className="flex">
         {/* Saldo */}
-        <div className="flex-1 p-3 sm:p-4 bg-[#0d1117]/90 border-r border-[#2a3142]">
-          <div className="flex items-center justify-between mb-1.5">
+        <div className="flex-1 p-4 bg-[#0d1117] border-r border-[#2a3142]">
+          <div className="flex items-center justify-between mb-2">
             <p className="text-gray-400 text-xs font-medium">Saldo</p>
             <AccountSwitcherButton onSwitching={setIsSwitching} />
           </div>
-          <p className="text-white text-lg sm:text-xl md:text-2xl font-bold tracking-tight tabular-nums">
-            <span className="text-gray-500 text-sm">$</span>{' '}
+          <p className="text-white text-xl sm:text-2xl font-bold tracking-tight tabular-nums">
+            <span className="text-gray-500 text-base">$</span>{' '}
             {displayBalance.toFixed(2)}{' '}
-            <span className="text-xs font-normal text-gray-500">{currency}</span>
+            <span className="text-sm font-normal text-gray-500">{currency}</span>
           </p>
         </div>
 
         {/* Lucro/Prejuízo */}
-        <div className="flex-1 p-3 sm:p-4 bg-[#1a1f2e]">
-          <p className="text-gray-400 text-xs mb-1.5 font-medium">Lucro / Prejuízo</p>
-          <p className={`text-lg sm:text-xl md:text-2xl font-bold tracking-tight tabular-nums
-            transition-colors duration-500
-            ${isProfit ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}
-          >
-            <span className="text-sm opacity-60">{isProfit ? '+' : '–'}$</span>{' '}
-            {Math.abs(displayProfit).toFixed(2)}
+        <div className="flex-1 p-4 bg-[#1a1f2e] flex flex-col justify-between">
+          <p className="text-gray-400 text-xs mb-2 font-medium">Lucro/Prejuízo</p>
+          <p className={`text-xl sm:text-2xl font-bold tracking-tight tabular-nums transition-colors duration-500 ${isProfit ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+            <span className="text-base opacity-70">$</span>{' '}
+            {displayProfit.toFixed(2)}
           </p>
-        </div>
-      </div>
-
-      {/* Operações */}
-      <div className="px-3 sm:px-4 py-2 bg-[#0d1117]/50 border-t border-[#2a3142]
-        flex items-center justify-between">
-        <span className="text-gray-600 text-[9px] uppercase tracking-widest font-bold">
-          Operações
-        </span>
-        <div className="flex items-center gap-2">
-          <span className="text-[#22c55e] text-xs font-bold tabular-nums">{wins}W</span>
-          <span className="text-gray-600 text-[9px]">/</span>
-          <span className="text-[#ef4444] text-xs font-bold tabular-nums">{losses}L</span>
-          {winRate !== null && (
-            <>
-              <span className="text-gray-700 text-[9px] mx-0.5">·</span>
-              <span className={`text-[10px] font-bold tabular-nums
-                ${winRate >= 50 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
-                {winRate}%
-              </span>
-            </>
-          )}
+          
+          {/* Operações inline */}
+          <div className="flex items-center gap-1 mt-2 text-gray-400 text-xs">
+            <span>Operações</span>
+            <span className="text-[#22c55e] font-bold">{wins}</span>
+            <span>/</span>
+            <span className="text-[#ef4444] font-bold">{losses}</span>
+          </div>
         </div>
       </div>
     </div>

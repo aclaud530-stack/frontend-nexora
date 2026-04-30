@@ -27,24 +27,26 @@ export function Footer() {
   }, [])
 
   return (
-    <div className="flex items-center justify-between gap-2 px-3 sm:px-4 py-2.5 bg-[#0d1117] rounded-xl border-2 border-[#2a3142] shadow-lg">
+    <div className="flex items-center justify-between gap-3 px-4 py-3 bg-[#0d1117] rounded-xl border border-[#2a3142]">
+      {/* Status de conexão */}
       <div className="flex items-center gap-2">
         <span 
-          className={`w-2 h-2 rounded-full shrink-0 transition-colors duration-300 ${
-            isConnected ? 'bg-[#22c55e] animate-pulse' : 'bg-[#ef4444]'
+          className={`w-2.5 h-2.5 rounded-full shrink-0 transition-all duration-300 ${
+            isConnected 
+              ? 'bg-[#22c55e] shadow-[0_0_8px_rgba(34,197,94,0.6)]' 
+              : 'bg-[#ef4444] shadow-[0_0_8px_rgba(239,68,68,0.6)]'
           }`} 
         />
-        <span className="text-white font-medium text-xs sm:text-sm">{broker}</span>
-        <span className={`text-xs ${isConnected ? 'text-gray-500' : 'text-[#ef4444]'}`}>
-          {isConnected ? 'Conectado' : 'Desconectado'}
-        </span>
+        <span className="text-white font-semibold text-sm">{broker}</span>
       </div>
       
-      <div className="text-gray-400 text-[10px] sm:text-xs font-mono tracking-tight truncate">
+      {/* Timestamp */}
+      <div className="text-gray-400 text-xs font-mono tracking-tight">
         {currentTime}
       </div>
       
-      <button className="text-gray-400 hover:text-white text-xs sm:text-sm underline underline-offset-2 transition-colors shrink-0">
+      {/* Link para planilha */}
+      <button className="text-gray-400 hover:text-[#2ec7ff] text-sm font-medium transition-colors">
         Planilha
       </button>
     </div>
