@@ -4,12 +4,12 @@
  * trading-context.tsx
  *
  * WebSocket robusto com:
- * - Reconexão exponencial com jitter (evita thundering herd com muitos utilizadores)
+ * - Autenticação via OTP (REST → WebSocket URL autenticado)
+ * - Reconexão exponencial com jitter
  * - Heartbeat / ping-pong para detetar conexões mortas
  * - Fila de mensagens offline — enviadas após reconexão
- * - Tick sincronizado via timestamp do servidor (todos os clientes veem o mesmo instante)
  * - Dados do gráfico de barras calculados sem bloquear o render thread
- * - Limite de candles para evitar memory leaks com muitos utilizadores
+ * - Limite de candles para evitar memory leaks
  */
 
 import {
@@ -65,7 +65,6 @@ export interface ChartData {
 }
 
 interface TradingContextValue {
-  // Estado de mercado
   balance:      number
   profit:       number
   wins:         number
@@ -76,16 +75,13 @@ interface TradingContextValue {
   isConnected:  boolean
   loading:      boolean
 
-  // Tick selecionado
   selectedTicks:    number
   setSelectedTicks: (t: number) => void
 
-  // Trades
   trades:          Trade[]
   clearTrades:     () => Promise<void>
   isLoadingTrades: boolean
 
-  // Bot
   strategies:          Strategy[]
   currentStrategy:     Strategy | null
   setCurrentStrategy:  (s: Strategy) => void
@@ -96,24 +92,30 @@ interface TradingContextValue {
 
 const TradingContext = createContext<TradingContextValue | undefined>(undefined)
 
-// ── Constantes de WebSocket ────────────────────────────────────────────────────
+// ── Constantes ────────────────────────────────────────────────────────────────
 
-const WS_URL              = process.env.NEXT_PUBLIC_WS_URL || 'wss://ws.derivws.com/websockets/v3?app_id=1089'
-const RECONNECT_BASE_MS   = 1_000      // 1 s inicial
-const RECONNECT_MAX_MS    = 30_000     // máximo 30 s
-const HEARTBEAT_INTERVAL  = 20_000     // ping a cada 20 s
-const HEARTBEAT_TIMEOUT   = 10_000     // se não vier pong em 10 s → reconectar
-const MAX_CANDLES         = 500        // limite de candles em memória
-const MAX_DIGIT_HISTORY   = 1_000      // histórico de dígitos para calcular percentagens
+// REST base — para obter OTP
+const REST_BASE_URL       = process.env.NEXT_PUBLIC_DERIV_REST_URL || 'https://api.derivws.com'
+// App ID registado no Deriv
+const APP_ID              = process.env.NEXT_PUBLIC_DERIV_APP_ID   || ''
+// WS público (sem autenticação) — para dados de mercado
+const WS_PUBLIC_URL       = 'wss://api.derivws.com/trading/v1/options/ws/public'
+// Símbolo correto conforme documentação
+const SYMBOL              = '1HZ100V'
+
+const RECONNECT_BASE_MS   = 1_000
+const RECONNECT_MAX_MS    = 30_000
+const HEARTBEAT_INTERVAL  = 20_000
+const HEARTBEAT_TIMEOUT   = 10_000
+const MAX_CANDLES         = 500
+const MAX_DIGIT_HISTORY   = 1_000
 
 // ── Utilitários ───────────────────────────────────────────────────────────────
 
-/** Jitter aleatório para escalonar reconexões de múltiplos clientes */
 function jitter(ms: number) {
   return ms + Math.random() * ms * 0.3
 }
 
-/** Calcula barData a partir do histórico de dígitos */
 function computeBarData(digits: number[], windowSize: number): BarEntry[] {
   const slice  = digits.slice(-windowSize)
   const counts = Array(10).fill(0)
@@ -130,10 +132,8 @@ function computeBarData(digits: number[], windowSize: number): BarEntry[] {
   }))
 }
 
-/** Agrega ticks em candles de 1 minuto */
 function buildCandles(ticks: { epoch: number; price: number }[]): Candle[] {
   const map = new Map<number, { o: number; h: number; l: number; c: number }>()
-
   ticks.forEach(({ epoch, price }) => {
     const minute = Math.floor(epoch / 60) * 60 * 1000
     const existing = map.get(minute)
@@ -145,11 +145,42 @@ function buildCandles(ticks: { epoch: number; price: number }[]): Candle[] {
       existing.c = price
     }
   })
-
   return Array.from(map.entries())
     .sort(([a], [b]) => a - b)
     .slice(-MAX_CANDLES)
     .map(([x, v]) => ({ x, ...v }))
+}
+
+// ── Obter URL WebSocket autenticado via OTP ───────────────────────────────────
+//
+// Fluxo conforme documentação:
+//   1. POST /trading/v1/options/accounts/{accountId}/otp  (com Bearer token OAuth2)
+//   2. Resposta: { data: { url: "wss://...?otp=..." } }
+//   3. Abrir WebSocket com esse URL
+//
+// Se não houver token OAuth2 ou accountId, usa o endpoint público (sem auth).
+
+async function fetchOtpWsUrl(
+  accountId: string,
+  oauthToken: string,
+): Promise<string> {
+  const res = await fetch(
+    `${REST_BASE_URL}/trading/v1/options/accounts/${accountId}/otp`,
+    {
+      method: 'POST',
+      headers: {
+        'Deriv-App-ID':  APP_ID,
+        'Authorization': `Bearer ${oauthToken}`,
+      },
+    },
+  )
+
+  if (!res.ok) {
+    throw new Error(`OTP request failed: ${res.status} ${res.statusText}`)
+  }
+
+  const json = await res.json() as { data: { url: string } }
+  return json.data.url
 }
 
 // ── Provider ──────────────────────────────────────────────────────────────────
@@ -183,11 +214,13 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   const heartbeatTimer   = useRef<ReturnType<typeof setInterval> | null>(null)
   const pongTimer        = useRef<ReturnType<typeof setTimeout> | null>(null)
   const retryCount       = useRef(0)
-  const messageQueue     = useRef<string[]>([])   // mensagens enviadas offline
+  const messageQueue     = useRef<string[]>([])
   const digitHistory     = useRef<number[]>([])
   const tickHistory      = useRef<{ epoch: number; price: number }[]>([])
   const selectedTicksRef = useRef(selectedTicks)
   const mountedRef       = useRef(true)
+  // Guardamos o proposalId pendente para uso no bot
+  const pendingProposalId = useRef<string | null>(null)
 
   useEffect(() => {
     selectedTicksRef.current = selectedTicks
@@ -218,10 +251,8 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     heartbeatTimer.current = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return
 
-      // Enviar ping à Deriv API
       ws.send(JSON.stringify({ ping: 1 }))
 
-      // Timeout para pong
       pongTimer.current = setTimeout(() => {
         console.warn('[WS] Pong timeout — forçando reconexão')
         ws.close(4000, 'heartbeat timeout')
@@ -240,18 +271,17 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     try { msg = JSON.parse(raw) } catch { return }
 
     // Pong — cancelar timeout
-    if (msg.pong || msg.msg_type === 'ping') {
+    if (msg.msg_type === 'ping') {
       if (pongTimer.current) clearTimeout(pongTimer.current)
       return
     }
 
     // Tick em tempo real
     if (msg.msg_type === 'tick' && msg.tick) {
-      const tick = msg.tick as { quote: number; epoch: number }
+      const tick  = msg.tick as { quote: number; epoch: number }
       const price = tick.quote
       const epoch = tick.epoch
 
-      // Último dígito
       const priceStr = price.toFixed(2)
       const digit    = parseInt(priceStr[priceStr.length - 1], 10)
 
@@ -268,7 +298,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       setLastDigit(digit)
       setLoading(false)
 
-      // Calcular barData e candles num microtask para não bloquear o render
       const w = selectedTicksRef.current
       queueMicrotask(() => {
         if (!mountedRef.current) return
@@ -296,12 +325,27 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       setCurrency(b.currency)
     }
 
-    // Compra confirmada
-    if (msg.msg_type === 'buy' && msg.buy) {
-      setBotStatus(s => ({ ...s, currentStep: 'contract_open' }))
+    // Proposta — guardar ID para uso no buy
+    if (msg.msg_type === 'proposal' && msg.proposal) {
+      const p = msg.proposal as { id: string }
+      pendingProposalId.current = p.id
     }
 
-    // Proposta (contrato fechado)
+    // Compra confirmada
+    if (msg.msg_type === 'buy' && msg.buy) {
+      const buyData = msg.buy as { contract_id: number }
+      setBotStatus(s => ({ ...s, currentStep: 'contract_open' }))
+
+      // Subscrever atualizações do contrato aberto
+      send({
+        proposal_open_contract: 1,
+        contract_id: buyData.contract_id,
+        subscribe: 1,
+        req_id: 10,
+      })
+    }
+
+    // Contrato fechado
     if (msg.msg_type === 'proposal_open_contract' && msg.proposal_open_contract) {
       const poc = msg.proposal_open_contract as {
         is_sold?: number; profit?: number; entry_tick?: number;
@@ -328,16 +372,41 @@ export function TradingProvider({ children }: { children: ReactNode }) {
         setTimeout(() => setBotStatus(s => ({ ...s, currentStep: 'idle' })), 1500)
       }
     }
-  }, [])
+  }, [send])
 
   // ── Conexão WebSocket ──────────────────────────────────────────────────────
-  const connect = useCallback(() => {
+  //
+  // Fluxo:
+  //   1. Se existir NEXT_PUBLIC_OAUTH_TOKEN + NEXT_PUBLIC_ACCOUNT_ID → obter OTP via REST
+  //      e abrir WS autenticado (wss://...?otp=...).
+  //   2. Caso contrário → abrir WS público (sem auth) para dados de mercado.
+
+  const connect = useCallback(async () => {
     if (!mountedRef.current) return
     if (wsRef.current && wsRef.current.readyState < 2) {
       wsRef.current.close()
     }
 
-    const ws = new WebSocket(WS_URL)
+    const oauthToken = process.env.NEXT_PUBLIC_OAUTH_TOKEN  || ''
+    const accountId  = process.env.NEXT_PUBLIC_ACCOUNT_ID   || ''
+
+    let wsUrl = WS_PUBLIC_URL
+
+    if (oauthToken && accountId) {
+      try {
+        wsUrl = await fetchOtpWsUrl(accountId, oauthToken)
+        console.info('[WS] OTP obtido — a conectar com autenticação')
+      } catch (err) {
+        console.warn('[WS] Falha ao obter OTP, a usar WS público:', err)
+        wsUrl = WS_PUBLIC_URL
+      }
+    } else {
+      console.info('[WS] Sem credenciais OAuth2 — a usar WS público')
+    }
+
+    if (!mountedRef.current) return
+
+    const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 
     ws.onopen = () => {
@@ -349,10 +418,13 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       startHeartbeat(ws)
       flushQueue(ws)
 
-      // Subscrever ticks em tempo real (R_100 como exemplo — substituir pelo símbolo real)
-      ws.send(JSON.stringify({ ticks: 'R_100', subscribe: 1 }))
-      // Subscrever balance
-      ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
+      // Subscrever ticks em tempo real — símbolo correto conforme documentação
+      ws.send(JSON.stringify({ ticks: SYMBOL, subscribe: 1, req_id: 1 }))
+
+      // Balance só disponível com autenticação
+      if (oauthToken && accountId) {
+        ws.send(JSON.stringify({ balance: 1, subscribe: 1, req_id: 2 }))
+      }
     }
 
     ws.onmessage = e => handleMessage(e.data as string)
@@ -363,10 +435,8 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       setIsConnected(false)
       wsRef.current = null
 
-      // Não reconectar se foi um fecho intencional (código 1000)
       if (e.code === 1000) return
 
-      // Backoff exponencial com jitter
       const delay = Math.min(
         jitter(RECONNECT_BASE_MS * Math.pow(2, retryCount.current)),
         RECONNECT_MAX_MS,
@@ -377,7 +447,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     }
 
     ws.onerror = () => {
-      // onerror é sempre seguido de onclose — deixar onclose tratar a reconexão
       console.warn('[WS] Erro na conexão WebSocket')
     }
   }, [handleMessage, startHeartbeat, stopHeartbeat, flushQueue])
@@ -392,17 +461,69 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       stopHeartbeat()
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (wsRef.current) {
-        wsRef.current.onclose = null   // impedir reconexão no unmount
+        wsRef.current.onclose = null
         wsRef.current.close(1000, 'unmount')
       }
     }
   }, [connect, stopHeartbeat])
 
   // ── Bot ────────────────────────────────────────────────────────────────────
+  //
+  // Fluxo correto conforme documentação:
+  //   1. Enviar "proposal" para obter preço e ID
+  //   2. Aguardar resposta "proposal" (guardamos o ID em pendingProposalId)
+  //   3. Enviar "buy" com o proposal ID e o ask_price
+
   const startBot = useCallback(async () => {
     if (!currentStrategy) return
     setBotStatus({ isRunning: true, currentStep: 'analyzing' })
-    send({ buy: 1, price: 1, parameters: { contract_type: 'DIGITMATCH', symbol: 'R_100', duration: 1, duration_unit: 't', amount: 1, basis: 'stake', barrier: '5' } })
+    pendingProposalId.current = null
+
+    // Mapear estratégia para contract_type
+    const contractTypeMap: Record<string, string> = {
+      digit_diff:  'DIGITDIFF',
+      digit_match: 'DIGITMATCH',
+      over_under:  'DIGITOVER',
+      even_odd:    'DIGITEVEN',
+    }
+    const contractType = contractTypeMap[currentStrategy.id] ?? 'DIGITDIFF'
+
+    // Passo 1: pedir proposta
+    send({
+      proposal: 1,
+      amount: 1,
+      basis: 'stake',
+      contract_type: contractType,
+      currency: 'USD',
+      duration: 1,
+      duration_unit: 't',
+      underlying_symbol: SYMBOL,
+      barrier: '5',
+      req_id: 20,
+    })
+
+    // Passo 2: aguardar a resposta "proposal" (tratada em handleMessage)
+    // Passo 3: comprar após receber o proposal ID
+    const waitAndBuy = async () => {
+      const deadline = Date.now() + 5_000 // timeout de 5 s
+      while (!pendingProposalId.current && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 100))
+      }
+
+      if (!pendingProposalId.current) {
+        console.warn('[Bot] Timeout a aguardar proposta')
+        setBotStatus({ isRunning: false, currentStep: 'idle' })
+        return
+      }
+
+      send({
+        buy: pendingProposalId.current,
+        price: 1,  // máximo disposto a pagar — igual ao stake
+        req_id: 21,
+      })
+    }
+
+    waitAndBuy()
   }, [currentStrategy, send])
 
   const stopBot = useCallback(async () => {
