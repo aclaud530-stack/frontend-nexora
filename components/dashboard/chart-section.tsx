@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const SYMBOL       = '1HZ100V'
-const WS_URL       = 'wss://ws.derivws.com/websockets/v3?app_id=1089'
+const WS_URL       = 'wss://api.derivws.com/trading/v1/options/ws/public'
 const TICK_OPTIONS = [25, 50, 100, 250, 500, 1000]
 const DEFAULT_MAX  = 500
 
