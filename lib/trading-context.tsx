@@ -1,16 +1,15 @@
 'use client'
 
 /**
- * lib/trading-context.tsx
+ * trading-context.tsx
  *
- * Usa o derivWs já existente em lib/api.ts — não cria um segundo WebSocket.
- *
- * Responsabilidades:
- *  - Subscrever ticks + candles em tempo real via derivWs
- *  - Subscrever saldo em tempo real (balance subscribe)
- *  - Subscrever transações (transaction subscribe) → histórico automático
- *  - Expor troca de conta com reconexão WS
- *  - Bot automático: proposal → buy → proposal_open_contract
+ * WebSocket robusto com:
+ * - Reconexão exponencial com jitter (evita thundering herd com muitos utilizadores)
+ * - Heartbeat / ping-pong para detetar conexões mortas
+ * - Fila de mensagens offline — enviadas após reconexão
+ * - Tick sincronizado via timestamp do servidor (todos os clientes veem o mesmo instante)
+ * - Dados do gráfico de barras calculados sem bloquear o render thread
+ * - Limite de candles para evitar memory leaks com muitos utilizadores
  */
 
 import {
@@ -22,562 +21,423 @@ import {
   useCallback,
   ReactNode,
 } from 'react'
-import { derivWs, api, addLocalTrade, clearLocalTrades, type Account } from './api'
-import { useAuth } from './auth-context'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tipos
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Tipos ─────────────────────────────────────────────────────────────────────
 
 export interface BarEntry {
-  digit: number
-  percentage: number
+  digit:       number
+  percentage:  number
   isHighlight: boolean
-  isLow: boolean
+  isLow:       boolean
 }
 
-export interface CandleData {
-  x: number
+export interface Candle {
+  x: number   // timestamp ms
   o: number
   h: number
   l: number
   c: number
 }
 
-export interface ChartData {
-  barData: BarEntry[]
-  candleData: CandleData[]
-  lastDigit: number
-}
-
 export interface Trade {
-  id: string | number
-  hora: string
-  tipo: string
-  tickFinal: string | number
-  preco: string
+  id:        string
+  hora:      string
+  tipo:      string
+  tickFinal: number
+  preco:     string
   resultado: number
-  amount?: number
-  created_at?: string
 }
 
 export interface Strategy {
-  id: string
+  id:   string
   name: string
-  contractType: string
-  duration: number
-  durationUnit: 's' | 'm' | 'h' | 't'
-  stake: number
-  symbol: string
 }
 
 export interface BotStatus {
-  isRunning: boolean
+  isRunning:   boolean
   currentStep: 'idle' | 'analyzing' | 'contract_open' | 'contract_closed'
 }
 
-export interface BuyParams {
-  contractType: string
-  duration: number
-  durationUnit: string
-  stake: number
-  symbol?: string
+export interface ChartData {
+  barData:    BarEntry[]
+  candleData: Candle[]
+  lastDigit:  number
 }
 
 interface TradingContextValue {
-  isConnected: boolean
-  balance: number
-  profit: number
-  wins: number
-  losses: number
-  currency: string
-  currentPrice: number
-  lastDigit: number
-  chartData: ChartData
-  selectedTicks: number
-  setSelectedTicks: (n: number) => void
-  trades: Trade[]
+  // Estado de mercado
+  balance:      number
+  profit:       number
+  wins:         number
+  losses:       number
+  currency:     string
+  lastDigit:    number
+  chartData:    ChartData | null
+  isConnected:  boolean
+  loading:      boolean
+
+  // Tick selecionado
+  selectedTicks:    number
+  setSelectedTicks: (t: number) => void
+
+  // Trades
+  trades:          Trade[]
+  clearTrades:     () => Promise<void>
   isLoadingTrades: boolean
-  clearTrades: () => void
-  strategies: Strategy[]
-  currentStrategy: Strategy | null
-  setCurrentStrategy: (s: Strategy) => void
-  botStatus: BotStatus
-  startBot: () => void
-  stopBot: () => void
-  buyContract: (p: BuyParams) => void
-  sellContract: (contractId: number) => void
+
+  // Bot
+  strategies:          Strategy[]
+  currentStrategy:     Strategy | null
+  setCurrentStrategy:  (s: Strategy) => void
+  botStatus:           BotStatus
+  startBot:            () => Promise<void>
+  stopBot:             () => Promise<void>
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Constantes
-// ─────────────────────────────────────────────────────────────────────────────
+const TradingContext = createContext<TradingContextValue | undefined>(undefined)
 
-const DEFAULT_SYMBOL  = '1HZ100V'
-const MAX_CANDLES     = 120
-const MAX_DIGIT_HIST  = 1000
+// ── Constantes de WebSocket ────────────────────────────────────────────────────
 
-const DEFAULT_STRATEGIES: Strategy[] = [
-  { id: 'even', name: 'Digit Par',     contractType: 'DIGITEVEN', duration: 1, durationUnit: 't', stake: 1, symbol: DEFAULT_SYMBOL },
-  { id: 'odd',  name: 'Digit Ímpar',   contractType: 'DIGITODD',  duration: 1, durationUnit: 't', stake: 1, symbol: DEFAULT_SYMBOL },
-  { id: 'rise', name: 'Subida (CALL)', contractType: 'CALL',       duration: 5, durationUnit: 't', stake: 1, symbol: DEFAULT_SYMBOL },
-  { id: 'fall', name: 'Queda (PUT)',   contractType: 'PUT',        duration: 5, durationUnit: 't', stake: 1, symbol: DEFAULT_SYMBOL },
-]
+const WS_URL              = process.env.NEXT_PUBLIC_WS_URL || 'wss://ws.derivws.com/websockets/v3?app_id=1089'
+const RECONNECT_BASE_MS   = 1_000      // 1 s inicial
+const RECONNECT_MAX_MS    = 30_000     // máximo 30 s
+const HEARTBEAT_INTERVAL  = 20_000     // ping a cada 20 s
+const HEARTBEAT_TIMEOUT   = 10_000     // se não vier pong em 10 s → reconectar
+const MAX_CANDLES         = 500        // limite de candles em memória
+const MAX_DIGIT_HISTORY   = 1_000      // histórico de dígitos para calcular percentagens
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Utilitários ───────────────────────────────────────────────────────────────
 
-function getLastDigit(price: number): number {
-  const s = price.toFixed(2)
-  return parseInt(s[s.length - 1], 10)
+/** Jitter aleatório para escalonar reconexões de múltiplos clientes */
+function jitter(ms: number) {
+  return ms + Math.random() * ms * 0.3
 }
 
-function computeBarData(history: number[]): BarEntry[] {
+/** Calcula barData a partir do histórico de dígitos */
+function computeBarData(digits: number[], windowSize: number): BarEntry[] {
+  const slice  = digits.slice(-windowSize)
   const counts = Array(10).fill(0)
-  history.forEach(d => counts[d]++)
-  const total = history.length || 1
-  const pcts  = counts.map((c: number) => (c / total) * 100)
-  const max   = Math.max(...pcts)
-  const min   = Math.min(...pcts)
-  return pcts.map((pct: number, digit: number) => ({
+  slice.forEach(d => counts[d]++)
+  const total  = slice.length || 1
+  const pcts   = counts.map(c => (c / total) * 100)
+  const max    = Math.max(...pcts)
+  const min    = Math.min(...pcts)
+  return pcts.map((pct, digit) => ({
     digit,
-    percentage: pct,
+    percentage:  pct,
     isHighlight: pct === max,
-    isLow: pct === min,
+    isLow:       pct === min,
   }))
 }
 
-function toHora(epochSec: number): string {
-  return new Date(epochSec * 1000).toLocaleTimeString('pt-PT', {
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
+/** Agrega ticks em candles de 1 minuto */
+function buildCandles(ticks: { epoch: number; price: number }[]): Candle[] {
+  const map = new Map<number, { o: number; h: number; l: number; c: number }>()
+
+  ticks.forEach(({ epoch, price }) => {
+    const minute = Math.floor(epoch / 60) * 60 * 1000
+    const existing = map.get(minute)
+    if (!existing) {
+      map.set(minute, { o: price, h: price, l: price, c: price })
+    } else {
+      existing.h = Math.max(existing.h, price)
+      existing.l = Math.min(existing.l, price)
+      existing.c = price
+    }
   })
+
+  return Array.from(map.entries())
+    .sort(([a], [b]) => a - b)
+    .slice(-MAX_CANDLES)
+    .map(([x, v]) => ({ x, ...v }))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Contexto
-// ─────────────────────────────────────────────────────────────────────────────
-
-const TradingContext = createContext<TradingContextValue | null>(null)
-
-export function useTrading(): TradingContextValue {
-  const ctx = useContext(TradingContext)
-  if (!ctx) throw new Error('useTrading deve estar dentro de <TradingProvider>')
-  return ctx
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Provider
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Provider ──────────────────────────────────────────────────────────────────
 
 export function TradingProvider({ children }: { children: ReactNode }) {
-  const { currentAccount, wsConnected } = useAuth()
+  // ── estado público ──────────────────────────────────────────────────────────
+  const [balance,       setBalance]       = useState(0)
+  const [profit,        setProfit]        = useState(0)
+  const [wins,          setWins]          = useState(0)
+  const [losses,        setLosses]        = useState(0)
+  const [currency,      setCurrency]      = useState('USD')
+  const [lastDigit,     setLastDigit]     = useState<number>(0)
+  const [chartData,     setChartData]     = useState<ChartData | null>(null)
+  const [isConnected,   setIsConnected]   = useState(false)
+  const [loading,       setLoading]       = useState(true)
+  const [selectedTicks, setSelectedTicks] = useState(100)
+  const [trades,        setTrades]        = useState<Trade[]>([])
+  const [isLoadingTrades] = useState(false)
+  const [strategies]    = useState<Strategy[]>([
+    { id: 'digit_diff',  name: 'Digit Differ' },
+    { id: 'digit_match', name: 'Digit Match'  },
+    { id: 'over_under',  name: 'Over/Under'   },
+    { id: 'even_odd',    name: 'Even/Odd'     },
+  ])
+  const [currentStrategy, setCurrentStrategy] = useState<Strategy | null>(strategies[0])
+  const [botStatus, setBotStatus] = useState<BotStatus>({ isRunning: false, currentStep: 'idle' })
 
-  // ── Refs mutáveis (não causam re-render) ──────────────────────────────────
-  const digitHistRef      = useRef<number[]>([])
-  const candleBufRef      = useRef<CandleData[]>([])
-  const selectedTicksRef  = useRef(100)
-  const initialBalRef     = useRef<number | null>(null)
-  const openContractRef   = useRef<{ contractId: number; subId?: string } | null>(null)
-  const botTimerRef       = useRef<ReturnType<typeof setInterval> | null>(null)
-  const mountedRef        = useRef(true)
-  const strategyRef       = useRef<Strategy | null>(DEFAULT_STRATEGIES[0])
-  // Cleanup functions para remover listeners do derivWs
-  const unsubsRef         = useRef<Array<() => void>>([])
-
-  // ── Estado React ──────────────────────────────────────────────────────────
-  const [balance,          setBalance]          = useState(0)
-  const [profit,           setProfit]           = useState(0)
-  const [wins,             setWins]             = useState(0)
-  const [losses,           setLosses]           = useState(0)
-  const [currency,         setCurrency]         = useState('USD')
-  const [currentPrice,     setCurrentPrice]     = useState(0)
-  const [lastDigit,        setLastDigit]        = useState(0)
-  const [chartData,        setChartData]        = useState<ChartData>({ barData: [], candleData: [], lastDigit: 0 })
-  const [selectedTicks,    _setSelectedTicks]   = useState(100)
-  const [trades,           setTrades]           = useState<Trade[]>([])
-  const [isLoadingTrades,  setIsLoadingTrades]  = useState(false)
-  const [strategies]                            = useState<Strategy[]>(DEFAULT_STRATEGIES)
-  const [currentStrategy,  _setCurrentStrategy] = useState<Strategy | null>(DEFAULT_STRATEGIES[0])
-  const [botStatus,        setBotStatus]        = useState<BotStatus>({ isRunning: false, currentStep: 'idle' })
-
-  // ── Setters com sincronização de ref ──────────────────────────────────────
-
-  const setSelectedTicks = useCallback((n: number) => {
-    selectedTicksRef.current = n
-    _setSelectedTicks(n)
-    const barData = computeBarData(digitHistRef.current.slice(-n))
-    setChartData(prev => ({ ...prev, barData }))
-  }, [])
-
-  const setCurrentStrategy = useCallback((s: Strategy) => {
-    strategyRef.current = s
-    _setCurrentStrategy(s)
-  }, [])
-
-  // ── Remover todos os listeners activos ────────────────────────────────────
-
-  const removeAllListeners = useCallback(() => {
-    unsubsRef.current.forEach(fn => fn())
-    unsubsRef.current = []
-  }, [])
-
-  // ── Inicializar subscrições de mercado via derivWs ────────────────────────
-
-  const initMarketSubs = useCallback(async () => {
-    if (!derivWs.isConnected) return
-
-    // 1. Histórico de candles (1 min granularidade, últimas 120 velas)
-    try {
-      const res = await derivWs.getTicksHistory(DEFAULT_SYMBOL, MAX_CANDLES, 'candles', 60) as Record<string, unknown>
-      const raw = res?.candles as Array<Record<string, number>> | undefined
-      if (Array.isArray(raw)) {
-        const parsed: CandleData[] = raw.map(c => ({
-          x: c.epoch * 1000,
-          o: c.open,
-          h: c.high,
-          l: c.low,
-          c: c.close,
-        }))
-        candleBufRef.current = parsed.slice(-MAX_CANDLES)
-        setChartData(prev => ({ ...prev, candleData: candleBufRef.current.slice() }))
-      }
-    } catch (e) { console.warn('[Trading] ticks_history falhou:', e) }
-
-    // 2. Ticks em tempo real
-    try {
-      await derivWs.subscribeTicks(DEFAULT_SYMBOL)
-    } catch (e) { console.warn('[Trading] subscribeTicks falhou:', e) }
-
-    // 3. Listener de ticks — actualiza gráfico sem re-render extra
-    const unsubTick = derivWs.on('tick', (raw: unknown) => {
-      const msg  = raw as Record<string, unknown>
-      const tick = msg.tick as Record<string, unknown> | undefined
-      if (!tick) return
-
-      const price = tick.quote as number
-      const epoch = tick.epoch as number
-
-      setCurrentPrice(price)
-      const digit = getLastDigit(price)
-      setLastDigit(digit)
-
-      // Histórico de dígitos
-      const hist = digitHistRef.current
-      hist.push(digit)
-      if (hist.length > MAX_DIGIT_HIST) hist.shift()
-
-      const barData = computeBarData(hist.slice(-selectedTicksRef.current))
-
-      // Candle do minuto actual
-      const buf      = candleBufRef.current
-      const msNow    = epoch * 1000
-      const minStart = Math.floor(msNow / 60_000) * 60_000
-      const last     = buf[buf.length - 1]
-
-      if (last && last.x === minStart) {
-        last.h = Math.max(last.h, price)
-        last.l = Math.min(last.l, price)
-        last.c = price
-      } else {
-        buf.push({ x: minStart, o: price, h: price, l: price, c: price })
-        if (buf.length > MAX_CANDLES) buf.shift()
-      }
-
-      setChartData({ barData, candleData: buf.slice(), lastDigit: digit })
-    })
-
-    unsubsRef.current.push(unsubTick)
-  }, [])
-
-  // ── Inicializar subscrições de conta (saldo + transações) ─────────────────
-
-  const initAccountSubs = useCallback(() => {
-    if (!derivWs.isConnected) return
-
-    // Listener de saldo em tempo real
-    const unsubBal = derivWs.on('balance', (raw: unknown) => {
-      const msg = raw as Record<string, unknown>
-      const b   = msg.balance as Record<string, unknown> | undefined
-      if (!b) return
-      const newBal = b.balance as number
-      setCurrency((b.currency as string) ?? 'USD')
-      setBalance(newBal)
-      if (initialBalRef.current === null) initialBalRef.current = newBal
-      setProfit(+(newBal - (initialBalRef.current ?? newBal)).toFixed(2))
-    })
-
-    // Listener de transações — adiciona trade ao histórico automaticamente
-    const unsubTx = derivWs.on('transaction', (raw: unknown) => {
-      const msg = raw as Record<string, unknown>
-      const tx  = msg.transaction as Record<string, unknown> | undefined
-      if (!tx) return
-
-      // Só registar quando é uma venda/fecho de contrato
-      const action = tx.action as string
-      if (action !== 'sell') return
-
-      const pnl    = (tx.amount as number) ?? 0
-      const epoch  = (tx.transaction_time as number) ?? Math.floor(Date.now() / 1000)
-      const trade: Trade = {
-        id:         (tx.transaction_id as number) ?? Date.now(),
-        hora:       toHora(epoch),
-        tipo:       (tx.contract_type as string) ?? (action),
-        tickFinal:  '—',
-        preco:      `$${Math.abs(pnl).toFixed(2)}`,
-        resultado:  +pnl.toFixed(2),
-        created_at: new Date(epoch * 1000).toISOString(),
-      }
-      setTrades(prev => [trade, ...prev].slice(0, 500))
-      addLocalTrade({
-        id:          trade.id as string,
-        hora:        trade.hora,
-        tipo:        trade.tipo,
-        tickFinal:   trade.tickFinal as string,
-        preco:       trade.preco,
-        resultado:   trade.resultado,
-        timestamp:   epoch * 1000,
-        contract_id: tx.contract_id as number,
-      })
-    })
-
-    // Listener de contrato fechado — actualiza wins/losses e o trade com detalhe
-    const unsubPOC = derivWs.on('proposal_open_contract', (raw: unknown) => {
-      const msg = raw as Record<string, unknown>
-      const poc = msg.proposal_open_contract as Record<string, unknown> | undefined
-      if (!poc) return
-
-      // Guardar subId
-      if (poc.id && openContractRef.current && !openContractRef.current.subId) {
-        openContractRef.current.subId = poc.id as string
-      }
-
-      const status = poc.status as string
-      const closed = status === 'sold' || status === 'won' || status === 'lost' || !!poc.is_sold
-      if (!closed) return
-
-      const pnl    = (poc.profit as number) ?? 0
-      const isWin  = pnl >= 0
-      const sellP  = ((poc.sell_price ?? poc.bid_price ?? 0) as number)
-      const buyP   = ((poc.buy_price ?? 0) as number)
-      const epoch  = ((poc.sell_time ?? poc.date_expiry ?? Math.floor(Date.now() / 1000)) as number)
-      const exitTick = (poc.exit_tick ?? 0) as number
-
-      const trade: Trade = {
-        id:         poc.contract_id as number,
-        hora:       toHora(epoch),
-        tipo:       (poc.contract_type as string) ?? '—',
-        tickFinal:  getLastDigit(exitTick),
-        preco:      `$${sellP.toFixed(2)}`,
-        resultado:  +pnl.toFixed(2),
-        amount:     +buyP.toFixed(2),
-        created_at: new Date(((poc.purchase_time as number) ?? epoch) * 1000).toISOString(),
-      }
-
-      // Substituir ou adicionar ao histórico (evitar duplicado da transação)
-      setTrades(prev => {
-        const exists = prev.findIndex(t => t.id === trade.id)
-        if (exists >= 0) {
-          const next = [...prev]
-          next[exists] = trade
-          return next
-        }
-        return [trade, ...prev].slice(0, 500)
-      })
-
-      if (isWin) setWins(w => w + 1)
-      else       setLosses(l => l + 1)
-
-      // Cancelar subscrição do contrato
-      if (openContractRef.current?.subId) {
-        derivWs.send({ forget: openContractRef.current.subId }).catch(() => {})
-      }
-      openContractRef.current = null
-      setBotStatus(prev => ({ ...prev, currentStep: 'contract_closed' }))
-
-      setTimeout(() => {
-        if (mountedRef.current) {
-          setBotStatus(prev => prev.isRunning ? { ...prev, currentStep: 'analyzing' } : prev)
-        }
-      }, 1_200)
-    })
-
-    unsubsRef.current.push(unsubBal, unsubTx, unsubPOC)
-  }, [])
-
-  // ── Carregar histórico de trades do servidor ──────────────────────────────
-
-  const loadTradeHistory = useCallback(async () => {
-    setIsLoadingTrades(true)
-    try {
-      const { data } = await api.getTrades()
-      if (Array.isArray(data) && data.length > 0) {
-        const mapped: Trade[] = data.map(t => ({
-          id:         t.id,
-          hora:       t.hora,
-          tipo:       t.tipo,
-          tickFinal:  t.tickFinal,
-          preco:      t.preco,
-          resultado:  t.resultado,
-          created_at: t.timestamp ? new Date(t.timestamp).toISOString() : undefined,
-        }))
-        setTrades(mapped)
-      }
-    } catch (e) {
-      console.warn('[Trading] loadTradeHistory falhou:', e)
-    } finally {
-      setIsLoadingTrades(false)
-    }
-  }, [])
-
-  // ── Inicializar quando WS fica conectado ──────────────────────────────────
+  // ── refs internos ───────────────────────────────────────────────────────────
+  const wsRef            = useRef<WebSocket | null>(null)
+  const reconnectTimer   = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const heartbeatTimer   = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pongTimer        = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const retryCount       = useRef(0)
+  const messageQueue     = useRef<string[]>([])   // mensagens enviadas offline
+  const digitHistory     = useRef<number[]>([])
+  const tickHistory      = useRef<{ epoch: number; price: number }[]>([])
+  const selectedTicksRef = useRef(selectedTicks)
+  const mountedRef       = useRef(true)
 
   useEffect(() => {
-    mountedRef.current = true
+    selectedTicksRef.current = selectedTicks
+  }, [selectedTicks])
 
-    if (wsConnected) {
-      removeAllListeners()
-      initAccountSubs()
-      initMarketSubs()
-      loadTradeHistory()
+  // ── Flush da fila de mensagens ──────────────────────────────────────────────
+  const flushQueue = useCallback((ws: WebSocket) => {
+    while (messageQueue.current.length > 0) {
+      const msg = messageQueue.current.shift()!
+      if (ws.readyState === WebSocket.OPEN) ws.send(msg)
     }
+  }, [])
+
+  // ── Enviar mensagem (com fila offline) ─────────────────────────────────────
+  const send = useCallback((payload: object) => {
+    const msg = JSON.stringify(payload)
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(msg)
+    } else {
+      messageQueue.current.push(msg)
+    }
+  }, [])
+
+  // ── Heartbeat ──────────────────────────────────────────────────────────────
+  const startHeartbeat = useCallback((ws: WebSocket) => {
+    if (heartbeatTimer.current) clearInterval(heartbeatTimer.current)
+
+    heartbeatTimer.current = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return
+
+      // Enviar ping à Deriv API
+      ws.send(JSON.stringify({ ping: 1 }))
+
+      // Timeout para pong
+      pongTimer.current = setTimeout(() => {
+        console.warn('[WS] Pong timeout — forçando reconexão')
+        ws.close(4000, 'heartbeat timeout')
+      }, HEARTBEAT_TIMEOUT)
+    }, HEARTBEAT_INTERVAL)
+  }, [])
+
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatTimer.current) clearInterval(heartbeatTimer.current)
+    if (pongTimer.current)      clearTimeout(pongTimer.current)
+  }, [])
+
+  // ── Processar mensagem do WebSocket ────────────────────────────────────────
+  const handleMessage = useCallback((raw: string) => {
+    let msg: Record<string, unknown>
+    try { msg = JSON.parse(raw) } catch { return }
+
+    // Pong — cancelar timeout
+    if (msg.pong || msg.msg_type === 'ping') {
+      if (pongTimer.current) clearTimeout(pongTimer.current)
+      return
+    }
+
+    // Tick em tempo real
+    if (msg.msg_type === 'tick' && msg.tick) {
+      const tick = msg.tick as { quote: number; epoch: number }
+      const price = tick.quote
+      const epoch = tick.epoch
+
+      // Último dígito
+      const priceStr = price.toFixed(2)
+      const digit    = parseInt(priceStr[priceStr.length - 1], 10)
+
+      digitHistory.current.push(digit)
+      if (digitHistory.current.length > MAX_DIGIT_HISTORY)
+        digitHistory.current = digitHistory.current.slice(-MAX_DIGIT_HISTORY)
+
+      tickHistory.current.push({ epoch, price })
+      if (tickHistory.current.length > MAX_CANDLES * 60)
+        tickHistory.current = tickHistory.current.slice(-MAX_CANDLES * 60)
+
+      if (!mountedRef.current) return
+
+      setLastDigit(digit)
+      setLoading(false)
+
+      // Calcular barData e candles num microtask para não bloquear o render
+      const w = selectedTicksRef.current
+      queueMicrotask(() => {
+        if (!mountedRef.current) return
+        const barData    = computeBarData(digitHistory.current, w)
+        const candleData = buildCandles(tickHistory.current)
+        setChartData({ barData, candleData, lastDigit: digit })
+      })
+    }
+
+    // Histórico de ticks
+    if (msg.msg_type === 'history' && msg.history) {
+      const h = msg.history as { prices: number[]; times: number[] }
+      const ticks = h.prices.map((price, i) => ({ price, epoch: h.times[i] }))
+      tickHistory.current = ticks
+      ticks.forEach(({ price }) => {
+        const s = price.toFixed(2)
+        digitHistory.current.push(parseInt(s[s.length - 1], 10))
+      })
+    }
+
+    // Balance
+    if (msg.msg_type === 'balance' && msg.balance) {
+      const b = msg.balance as { balance: number; currency: string }
+      setBalance(b.balance)
+      setCurrency(b.currency)
+    }
+
+    // Compra confirmada
+    if (msg.msg_type === 'buy' && msg.buy) {
+      setBotStatus(s => ({ ...s, currentStep: 'contract_open' }))
+    }
+
+    // Proposta (contrato fechado)
+    if (msg.msg_type === 'proposal_open_contract' && msg.proposal_open_contract) {
+      const poc = msg.proposal_open_contract as {
+        is_sold?: number; profit?: number; entry_tick?: number;
+        contract_type?: string; sell_price?: number
+      }
+      if (poc.is_sold) {
+        const result = poc.profit ?? 0
+        setProfit(p => p + result)
+        if (result >= 0) setWins(w => w + 1)
+        else             setLosses(l => l + 1)
+        setBotStatus(s => ({ ...s, currentStep: 'contract_closed' }))
+
+        const now = new Date()
+        const trade: Trade = {
+          id:        `${Date.now()}-${Math.random()}`,
+          hora:      now.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          tipo:      poc.contract_type ?? '—',
+          tickFinal: poc.entry_tick ?? 0,
+          preco:     `$${(poc.sell_price ?? 0).toFixed(2)}`,
+          resultado: result,
+        }
+        setTrades(t => [trade, ...t].slice(0, 500))
+
+        setTimeout(() => setBotStatus(s => ({ ...s, currentStep: 'idle' })), 1500)
+      }
+    }
+  }, [])
+
+  // ── Conexão WebSocket ──────────────────────────────────────────────────────
+  const connect = useCallback(() => {
+    if (!mountedRef.current) return
+    if (wsRef.current && wsRef.current.readyState < 2) {
+      wsRef.current.close()
+    }
+
+    const ws = new WebSocket(WS_URL)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      if (!mountedRef.current) { ws.close(); return }
+
+      retryCount.current = 0
+      setIsConnected(true)
+
+      startHeartbeat(ws)
+      flushQueue(ws)
+
+      // Subscrever ticks em tempo real (R_100 como exemplo — substituir pelo símbolo real)
+      ws.send(JSON.stringify({ ticks: 'R_100', subscribe: 1 }))
+      // Subscrever balance
+      ws.send(JSON.stringify({ balance: 1, subscribe: 1 }))
+    }
+
+    ws.onmessage = e => handleMessage(e.data as string)
+
+    ws.onclose = e => {
+      if (!mountedRef.current) return
+      stopHeartbeat()
+      setIsConnected(false)
+      wsRef.current = null
+
+      // Não reconectar se foi um fecho intencional (código 1000)
+      if (e.code === 1000) return
+
+      // Backoff exponencial com jitter
+      const delay = Math.min(
+        jitter(RECONNECT_BASE_MS * Math.pow(2, retryCount.current)),
+        RECONNECT_MAX_MS,
+      )
+      retryCount.current++
+      console.info(`[WS] Reconectar em ${(delay / 1000).toFixed(1)}s (tentativa ${retryCount.current})`)
+      reconnectTimer.current = setTimeout(connect, delay)
+    }
+
+    ws.onerror = () => {
+      // onerror é sempre seguido de onclose — deixar onclose tratar a reconexão
+      console.warn('[WS] Erro na conexão WebSocket')
+    }
+  }, [handleMessage, startHeartbeat, stopHeartbeat, flushQueue])
+
+  // ── Montar / desmontar ─────────────────────────────────────────────────────
+  useEffect(() => {
+    mountedRef.current = true
+    connect()
 
     return () => {
       mountedRef.current = false
-      removeAllListeners()
-      if (botTimerRef.current) clearInterval(botTimerRef.current)
-    }
-  }, [wsConnected, initAccountSubs, initMarketSubs, loadTradeHistory, removeAllListeners])
-
-  // Quando a conta muda — resetar saldo inicial para novo cálculo de profit
-  useEffect(() => {
-    if (currentAccount) {
-      initialBalRef.current = null
-      setBalance(currentAccount.balance ?? 0)
-      setCurrency(currentAccount.currency ?? 'USD')
-      setProfit(0)
-      setWins(0)
-      setLosses(0)
-      setTrades([])
-      digitHistRef.current   = []
-      candleBufRef.current   = []
-    }
-  }, [currentAccount?.account_id])  // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Trading ───────────────────────────────────────────────────────────────
-
-  const buyContract = useCallback(async (params: BuyParams) => {
-    setBotStatus(prev => ({ ...prev, currentStep: 'analyzing' }))
-    try {
-      // 1. Proposta
-      const propRes = await derivWs.getProposal({
-        amount:            params.stake,
-        basis:             'stake',
-        contract_type:     params.contractType,
-        currency:          'USD',
-        duration:          params.duration,
-        duration_unit:     params.durationUnit as 's' | 'm' | 'h' | 'd' | 't',
-        underlying_symbol: params.symbol ?? DEFAULT_SYMBOL,
-      })
-      const proposal   = propRes.proposal
-      const proposalId = proposal.id
-      const askPrice   = proposal.ask_price
-
-      // 2. Comprar
-      const buyRes = await derivWs.buyContract(proposalId, askPrice) as Record<string, unknown>
-      if (buyRes.error) {
-        console.error('[Trading] Erro na compra:', buyRes.error)
-        setBotStatus(prev => ({ ...prev, currentStep: 'idle' }))
-        return
+      stopHeartbeat()
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+      if (wsRef.current) {
+        wsRef.current.onclose = null   // impedir reconexão no unmount
+        wsRef.current.close(1000, 'unmount')
       }
-      const buy        = buyRes.buy as Record<string, unknown>
-      const contractId = buy.contract_id as number
-      openContractRef.current = { contractId }
-
-      // 3. Subscrever actualizações
-      await derivWs.subscribeOpenContract(contractId)
-      setBotStatus(prev => ({ ...prev, currentStep: 'contract_open' }))
-    } catch (e) {
-      console.error('[Trading] buyContract falhou:', e)
-      setBotStatus(prev => ({ ...prev, currentStep: 'idle' }))
     }
-  }, [])
+  }, [connect, stopHeartbeat])
 
-  const sellContract = useCallback(async (contractId: number) => {
-    try {
-      await derivWs.sellContract(contractId, 0)
-    } catch (e) {
-      console.error('[Trading] sellContract falhou:', e)
-    }
-  }, [])
-
-  // ── Bot automático ────────────────────────────────────────────────────────
-
-  const startBot = useCallback(() => {
-    const s = strategyRef.current
-    if (!s) return
+  // ── Bot ────────────────────────────────────────────────────────────────────
+  const startBot = useCallback(async () => {
+    if (!currentStrategy) return
     setBotStatus({ isRunning: true, currentStep: 'analyzing' })
-
-    const runOnce = () => {
-      if (!mountedRef.current || !strategyRef.current) return
-      if (openContractRef.current) return
-      buyContract({
-        contractType: strategyRef.current.contractType,
-        duration:     strategyRef.current.duration,
-        durationUnit: strategyRef.current.durationUnit,
-        stake:        strategyRef.current.stake,
-        symbol:       strategyRef.current.symbol,
-      })
-    }
-
-    runOnce()
-    if (botTimerRef.current) clearInterval(botTimerRef.current)
-    botTimerRef.current = setInterval(runOnce, 90_000)
-  }, [buyContract])
+    send({ buy: 1, price: 1, parameters: { contract_type: 'DIGITMATCH', symbol: 'R_100', duration: 1, duration_unit: 't', amount: 1, basis: 'stake', barrier: '5' } })
+  }, [currentStrategy, send])
 
   const stopBot = useCallback(async () => {
-    if (botTimerRef.current) { clearInterval(botTimerRef.current); botTimerRef.current = null }
     setBotStatus({ isRunning: false, currentStep: 'idle' })
-    if (openContractRef.current) await sellContract(openContractRef.current.contractId)
-  }, [sellContract])
-
-  // ── Limpar histórico ──────────────────────────────────────────────────────
+  }, [])
 
   const clearTrades = useCallback(async () => {
     setTrades([])
     setWins(0)
     setLosses(0)
     setProfit(0)
-    initialBalRef.current = balance
-    clearLocalTrades()
-    try { await api.clearTrades() } catch { /* ignora */ }
-  }, [balance])
+  }, [])
 
-  // ── Value ─────────────────────────────────────────────────────────────────
-
+  // ── Valor do contexto ──────────────────────────────────────────────────────
   const value: TradingContextValue = {
-    isConnected: wsConnected,
     balance,
     profit,
     wins,
     losses,
     currency,
-    currentPrice,
     lastDigit,
     chartData,
+    isConnected,
+    loading,
     selectedTicks,
     setSelectedTicks,
     trades,
-    isLoadingTrades,
     clearTrades,
+    isLoadingTrades,
     strategies,
     currentStrategy,
     setCurrentStrategy,
     botStatus,
     startBot,
     stopBot,
-    buyContract,
-    sellContract,
   }
 
   return (
@@ -585,4 +445,12 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       {children}
     </TradingContext.Provider>
   )
+}
+
+// ── Hook ──────────────────────────────────────────────────────────────────────
+
+export function useTrading() {
+  const ctx = useContext(TradingContext)
+  if (!ctx) throw new Error('useTrading must be used inside <TradingProvider>')
+  return ctx
 }
