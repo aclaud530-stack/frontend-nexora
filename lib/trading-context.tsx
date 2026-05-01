@@ -10,8 +10,6 @@ import {
   ReactNode,
 } from 'react'
 
-// ── Tipos ─────────────────────────────────────────────────────────────────────
-
 export interface BarEntry {
   digit:       number
   percentage:  number
@@ -53,40 +51,31 @@ interface TradingContextValue {
   chartData:    ChartData | null
   isConnected:  boolean
   loading:      boolean
-
   selectedTicks:    number
   setSelectedTicks: (t: number) => void
-
   trades:          Trade[]
   clearTrades:     () => Promise<void>
   isLoadingTrades: boolean
-
   strategies:         Strategy[]
   currentStrategy:    Strategy | null
   setCurrentStrategy: (s: Strategy) => void
   botStatus:          BotStatus
   startBot:           () => Promise<void>
   stopBot:            () => Promise<void>
-
-  disconnect: () => void
+  disconnect:         () => void
 }
 
 const TradingContext = createContext<TradingContextValue | undefined>(undefined)
-
-// ── Constantes ────────────────────────────────────────────────────────────────
 
 const REST_BASE_URL      = process.env.NEXT_PUBLIC_DERIV_REST_URL || 'https://api.derivws.com'
 const APP_ID             = process.env.NEXT_PUBLIC_DERIV_APP_ID   || ''
 const WS_PUBLIC_URL      = 'wss://api.derivws.com/trading/v1/options/ws/public'
 const SYMBOL             = '1HZ100V'
-
 const RECONNECT_BASE_MS  = 1_000
 const RECONNECT_MAX_MS   = 30_000
 const HEARTBEAT_INTERVAL = 20_000
 const HEARTBEAT_TIMEOUT  = 10_000
 const MAX_DIGIT_HISTORY  = 1_000
-
-// ── Utilitários ───────────────────────────────────────────────────────────────
 
 function jitter(ms: number) {
   return ms + Math.random() * ms * 0.3
@@ -101,10 +90,7 @@ function computeBarData(digits: number[], windowSize: number): BarEntry[] {
   const max   = Math.max(...pcts)
   const min   = Math.min(...pcts)
   return pcts.map((pct, digit) => ({
-    digit,
-    percentage:  pct,
-    isHighlight: pct === max,
-    isLow:       pct === min,
+    digit, percentage: pct, isHighlight: pct === max, isLow: pct === min,
   }))
 }
 
@@ -113,18 +99,13 @@ async function fetchOtpWsUrl(accountId: string, oauthToken: string): Promise<str
     `${REST_BASE_URL}/trading/v1/options/accounts/${accountId}/otp`,
     {
       method: 'POST',
-      headers: {
-        'Deriv-App-ID':  APP_ID,
-        'Authorization': `Bearer ${oauthToken}`,
-      },
+      headers: { 'Deriv-App-ID': APP_ID, 'Authorization': `Bearer ${oauthToken}` },
     },
   )
   if (!res.ok) throw new Error(`OTP request failed: ${res.status}`)
   const json = await res.json() as { data: { url: string } }
   return json.data.url
 }
-
-// ── Provider ──────────────────────────────────────────────────────────────────
 
 interface TradingProviderProps {
   children:   ReactNode
@@ -133,26 +114,26 @@ interface TradingProviderProps {
 }
 
 export function TradingProvider({ children, oauthToken, accountId }: TradingProviderProps) {
-  const [balance,       setBalance]       = useState(0)
-  const [profit,        setProfit]        = useState(0)
-  const [wins,          setWins]          = useState(0)
-  const [losses,        setLosses]        = useState(0)
-  const [currency,      setCurrency]      = useState('USD')
-  const [lastDigit,     setLastDigit]     = useState<number>(0)
-  const [chartData,     setChartData]     = useState<ChartData | null>(null)
-  const [isConnected,   setIsConnected]   = useState(false)
-  const [loading,       setLoading]       = useState(true)
-  const [selectedTicks, setSelectedTicks] = useState(100)
-  const [trades,        setTrades]        = useState<Trade[]>([])
-  const [isLoadingTrades]                 = useState(false)
-  const [strategies]                      = useState<Strategy[]>([
+  const [balance,         setBalance]         = useState(0)
+  const [profit,          setProfit]          = useState(0)
+  const [wins,            setWins]            = useState(0)
+  const [losses,          setLosses]          = useState(0)
+  const [currency,        setCurrency]        = useState('USD')
+  const [lastDigit,       setLastDigit]       = useState(0)
+  const [chartData,       setChartData]       = useState<ChartData | null>(null)
+  const [isConnected,     setIsConnected]     = useState(false)
+  const [loading,         setLoading]         = useState(true)
+  const [selectedTicks,   setSelectedTicks]   = useState(100)
+  const [trades,          setTrades]          = useState<Trade[]>([])
+  const [isLoadingTrades]                     = useState(false)
+  const [strategies]                          = useState<Strategy[]>([
     { id: 'digit_diff',  name: 'Digit Differ' },
     { id: 'digit_match', name: 'Digit Match'  },
     { id: 'over_under',  name: 'Over/Under'   },
     { id: 'even_odd',    name: 'Even/Odd'     },
   ])
   const [currentStrategy, setCurrentStrategy] = useState<Strategy | null>(strategies[0])
-  const [botStatus, setBotStatus] = useState<BotStatus>({ isRunning: false, currentStep: 'idle' })
+  const [botStatus,       setBotStatus]       = useState<BotStatus>({ isRunning: false, currentStep: 'idle' })
 
   const wsRef             = useRef<WebSocket | null>(null)
   const reconnectTimer    = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -164,16 +145,17 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
   const selectedTicksRef  = useRef(selectedTicks)
   const mountedRef        = useRef(true)
   const pendingProposalId = useRef<string | null>(null)
+  const oauthTokenRef     = useRef(oauthToken)
+  const accountIdRef      = useRef(accountId)
 
-  // Refs das credenciais — actualizadas quando as props mudam
-  const oauthTokenRef = useRef(oauthToken)
-  const accountIdRef  = useRef(accountId)
+  // ✅ Flag para evitar race condition: impede novo connect() enquanto um está a correr
+  const connectingRef     = useRef(false)
+  // ✅ Guarda as últimas credenciais autenticadas — evita reconectar sem necessidade
+  const lastAuthRef       = useRef('')
 
   useEffect(() => { selectedTicksRef.current = selectedTicks }, [selectedTicks])
-
-  // ── Sincronizar refs de credenciais ────────────────────────────────────────
-  useEffect(() => { oauthTokenRef.current = oauthToken }, [oauthToken])
-  useEffect(() => { accountIdRef.current  = accountId  }, [accountId])
+  useEffect(() => { oauthTokenRef.current    = oauthToken    }, [oauthToken])
+  useEffect(() => { accountIdRef.current     = accountId     }, [accountId])
 
   const flushQueue = useCallback((ws: WebSocket) => {
     while (messageQueue.current.length > 0) {
@@ -221,15 +203,12 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
       const tick     = msg.tick as { quote: number }
       const priceStr = tick.quote.toFixed(2)
       const digit    = parseInt(priceStr[priceStr.length - 1], 10)
-
       digitHistory.current.push(digit)
       if (digitHistory.current.length > MAX_DIGIT_HISTORY)
         digitHistory.current = digitHistory.current.slice(-MAX_DIGIT_HISTORY)
-
       if (!mountedRef.current) return
       setLastDigit(digit)
       setLoading(false)
-
       const w = selectedTicksRef.current
       queueMicrotask(() => {
         if (!mountedRef.current) return
@@ -285,15 +264,26 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
     }
   }, [send])
 
-  // ── Conexão WebSocket ──────────────────────────────────────────────────────
-
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (token: string, account: string) => {
+    // ✅ Evita race condition — só um connect() corre de cada vez
+    if (connectingRef.current) return
     if (!mountedRef.current) return
-    if (wsRef.current && wsRef.current.readyState < 2) wsRef.current.close()
 
-    const token   = oauthTokenRef.current
-    const account = accountIdRef.current
-    let wsUrl     = WS_PUBLIC_URL
+    connectingRef.current = true
+
+    // Fechar WS anterior de forma segura
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.onerror = null
+      if (wsRef.current.readyState < 2) { // CONNECTING ou OPEN
+        wsRef.current.close(1000, 'reconnect')
+      }
+      wsRef.current = null
+    }
+
+    stopHeartbeat()
+
+    let wsUrl = WS_PUBLIC_URL
 
     if (token && account) {
       try {
@@ -304,13 +294,15 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
         wsUrl = WS_PUBLIC_URL
       }
     } else {
-      console.info('[WS] Sem credenciais — WS público (não autenticado)')
+      console.info('[WS] Sem credenciais — WS público')
     }
 
-    if (!mountedRef.current) return
+    // Verificar se ainda faz sentido conectar
+    if (!mountedRef.current) { connectingRef.current = false; return }
 
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
+    connectingRef.current = false
 
     ws.onopen = () => {
       if (!mountedRef.current) { ws.close(); return }
@@ -331,6 +323,7 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
       stopHeartbeat()
       setIsConnected(false)
       wsRef.current = null
+      connectingRef.current = false
       if (e.code === 1000) return
       const delay = Math.min(
         jitter(RECONNECT_BASE_MS * Math.pow(2, retryCount.current)),
@@ -338,54 +331,50 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
       )
       retryCount.current++
       console.info(`[WS] Reconectar em ${(delay / 1000).toFixed(1)}s (tentativa ${retryCount.current})`)
-      reconnectTimer.current = setTimeout(connect, delay)
+      // Reconecta com as credenciais actuais (refs)
+      reconnectTimer.current = setTimeout(
+        () => connect(oauthTokenRef.current, accountIdRef.current),
+        delay,
+      )
     }
 
-    ws.onerror = () => console.warn('[WS] Erro na conexão WebSocket')
+    ws.onerror = () => {
+      connectingRef.current = false
+      console.warn('[WS] Erro na conexão WebSocket')
+    }
   }, [handleMessage, startHeartbeat, stopHeartbeat, flushQueue])
 
-  // ── Montar — conexão inicial (sem credenciais, WS público) ─────────────────
+  // ── Conexão inicial ────────────────────────────────────────────────────────
   useEffect(() => {
     mountedRef.current = true
-    connect()
+    connect('', '') // Começa sem credenciais — WS público
     return () => {
       mountedRef.current = false
+      connectingRef.current = false
       stopHeartbeat()
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(1000, 'unmount') }
     }
-  }, [connect, stopHeartbeat])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  // ── Reconectar quando as credenciais chegam após o auth terminar ───────────
-  // Quando oauthToken muda de '' para o token real, fecha o WS público
-  // e abre um novo WS autenticado com OTP
+  // ── Reconectar quando chegam credenciais reais ─────────────────────────────
+  // ✅ lastAuthRef evita reconectar com as mesmas credenciais (loop infinito)
   useEffect(() => {
     if (!oauthToken || !accountId) return
+
+    const authKey = `${oauthToken}:${accountId}`
+    if (lastAuthRef.current === authKey) return // já conectado com estas credenciais
+    lastAuthRef.current = authKey
+
     if (!mountedRef.current) return
 
     console.info('[WS] Credenciais recebidas — a reconectar autenticado')
-
-    // Cancelar reconexão automática pendente
-    if (reconnectTimer.current) {
-      clearTimeout(reconnectTimer.current)
-      reconnectTimer.current = null
-    }
-
-    // Fechar WS público sem disparar reconexão automática
-    if (wsRef.current) {
-      wsRef.current.onclose = null
-      wsRef.current.close(1000, 'reauth')
-      wsRef.current = null
-    }
-
-    stopHeartbeat()
-    setIsConnected(false)
+    if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null }
     retryCount.current = 0
 
-    // Conectar com credenciais reais
-    connect()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [oauthToken, accountId])
+    connect(oauthToken, accountId)
+  }, [oauthToken, accountId, connect])
 
   // ── Bot ────────────────────────────────────────────────────────────────────
 
@@ -408,7 +397,6 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
       const deadline = Date.now() + 5_000
       while (!pendingProposalId.current && Date.now() < deadline)
         await new Promise(r => setTimeout(r, 100))
-
       if (!pendingProposalId.current) {
         console.warn('[Bot] Timeout a aguardar proposta')
         setBotStatus({ isRunning: false, currentStep: 'idle' })
@@ -422,7 +410,9 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
   const clearTrades = useCallback(async () => { setTrades([]); setWins(0); setLosses(0); setProfit(0) }, [])
 
   const disconnect = useCallback(() => {
-    mountedRef.current = false
+    mountedRef.current   = false
+    connectingRef.current = false
+    lastAuthRef.current  = ''
     stopHeartbeat()
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
     if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(1000, 'logout'); wsRef.current = null }
