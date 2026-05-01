@@ -128,7 +128,6 @@ async function fetchOtpWsUrl(accountId: string, oauthToken: string): Promise<str
 
 interface TradingProviderProps {
   children:   ReactNode
-  // ✅ Credenciais resolvidas pelo auth-context antes de montar este provider
   oauthToken: string
   accountId:  string
 }
@@ -166,13 +165,15 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
   const mountedRef        = useRef(true)
   const pendingProposalId = useRef<string | null>(null)
 
-  // ✅ Refs para as credenciais — a reconexão automática usa sempre os valores mais recentes
+  // Refs das credenciais — actualizadas quando as props mudam
   const oauthTokenRef = useRef(oauthToken)
   const accountIdRef  = useRef(accountId)
 
   useEffect(() => { selectedTicksRef.current = selectedTicks }, [selectedTicks])
-  useEffect(() => { oauthTokenRef.current    = oauthToken },    [oauthToken])
-  useEffect(() => { accountIdRef.current     = accountId },     [accountId])
+
+  // ── Sincronizar refs de credenciais ────────────────────────────────────────
+  useEffect(() => { oauthTokenRef.current = oauthToken }, [oauthToken])
+  useEffect(() => { accountIdRef.current  = accountId  }, [accountId])
 
   const flushQueue = useCallback((ws: WebSocket) => {
     while (messageQueue.current.length > 0) {
@@ -285,7 +286,6 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
   }, [send])
 
   // ── Conexão WebSocket ──────────────────────────────────────────────────────
-  // ✅ Lê das refs — sempre actualizadas, mesmo nas reconexões automáticas
 
   const connect = useCallback(async () => {
     if (!mountedRef.current) return
@@ -344,6 +344,7 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
     ws.onerror = () => console.warn('[WS] Erro na conexão WebSocket')
   }, [handleMessage, startHeartbeat, stopHeartbeat, flushQueue])
 
+  // ── Montar — conexão inicial (sem credenciais, WS público) ─────────────────
   useEffect(() => {
     mountedRef.current = true
     connect()
@@ -354,6 +355,37 @@ export function TradingProvider({ children, oauthToken, accountId }: TradingProv
       if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(1000, 'unmount') }
     }
   }, [connect, stopHeartbeat])
+
+  // ── Reconectar quando as credenciais chegam após o auth terminar ───────────
+  // Quando oauthToken muda de '' para o token real, fecha o WS público
+  // e abre um novo WS autenticado com OTP
+  useEffect(() => {
+    if (!oauthToken || !accountId) return
+    if (!mountedRef.current) return
+
+    console.info('[WS] Credenciais recebidas — a reconectar autenticado')
+
+    // Cancelar reconexão automática pendente
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current)
+      reconnectTimer.current = null
+    }
+
+    // Fechar WS público sem disparar reconexão automática
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.close(1000, 'reauth')
+      wsRef.current = null
+    }
+
+    stopHeartbeat()
+    setIsConnected(false)
+    retryCount.current = 0
+
+    // Conectar com credenciais reais
+    connect()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [oauthToken, accountId])
 
   // ── Bot ────────────────────────────────────────────────────────────────────
 
