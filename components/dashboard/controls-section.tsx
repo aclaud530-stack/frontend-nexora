@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '@/lib/auth-context'
 import { useTrading } from '@/lib/trading-context'
-import { useLoader } from '@/components/ui/loader' // ajusta o path conforme o teu projeto
+import { useLoader } from '@/components/loader'
 
 function RefreshIcon() {
   return (
