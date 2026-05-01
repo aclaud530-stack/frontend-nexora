@@ -114,20 +114,20 @@ export const api = {
     const res = await fetchWithAuth('/api/accounts')
     const raw = res?.data?.accounts || res?.data || []
     const accounts: Account[] = Array.isArray(raw)
-      ? raw.map((a: Account) => ({ ...a, balance: Number(a.balance ?? 0) }))
+      ? raw.map((a: Account) => ({
+          ...a,
+          balance: Number(a.balance ?? 0),
+          // ✅ garante is_virtual mesmo que o backend não envie o campo
+          is_virtual: a.is_virtual ?? a.account_type === 'demo',
+        }))
       : []
     return { data: accounts }
   },
 
-  async switchAccount(accountId: string): Promise<{ success: boolean }> {
-    try {
-      return await fetchWithAuth('/api/accounts/switch', {
-        method: 'POST',
-        body: JSON.stringify({ account_id: accountId }),
-      })
-    } catch {
-      return { success: true }
-    }
+  // ✅ switchAccount removido — não existe endpoint na API Deriv.
+  // A troca de conta é feita via novo OTP no trading-context.
+  async switchAccount(_accountId: string): Promise<{ success: boolean }> {
+    return { success: true }
   },
 
   async getOTP(accountId: string): Promise<{ data: { wsUrl: string } }> {
