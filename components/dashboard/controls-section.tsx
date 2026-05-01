@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '@/lib/auth-context'
 import { useTrading } from '@/lib/trading-context'
+import { useLoader } from '@/components/ui/loader' // ajusta o path conforme o teu projeto
 
 function RefreshIcon() {
   return (
@@ -53,6 +54,8 @@ export function ControlsSection() {
     stopBot,
   } = useTrading()
 
+  const loader = useLoader()
+
   const [showAccountDropdown, setShowAccountDropdown]   = useState(false)
   const [showStrategyDropdown, setShowStrategyDropdown] = useState(false)
   const [animatedProgress, setAnimatedProgress]         = useState(0)
@@ -90,6 +93,34 @@ export function ControlsSection() {
     else await startBot()
   }
 
+  /**
+   * Seleciona a conta e dispara o loader enquanto a reconexão OTP acontece.
+   * Adapta o `reconnect` ao método real exposto pelo teu auth-context
+   * (ex: switchAccount, reconnectOTP, authorize, etc.)
+   */
+  const handleAccountSelect = async (account: typeof accounts[number]) => {
+    setShowAccountDropdown(false)
+
+    // Nada a fazer se já é a conta activa
+    if (currentAccount?.account_id === account.account_id) return
+
+    const label = account.is_virtual ? 'Conta Demo' : 'Conta Real'
+    loader.show(`A ligar a ${label}…`)
+
+    try {
+      // 1. Actualiza a conta no contexto (isto deve disparar a reconexão OTP internamente)
+      await setCurrentAccount(account)
+
+      // 2. Se o teu contexto expõe um método explícito de reconexão, chama-o aqui:
+      // await reconnectOTP(account)
+
+      loader.complete(`${label} activa!`)
+    } catch (err) {
+      console.error('Erro ao trocar conta:', err)
+      loader.hide()
+    }
+  }
+
   // Só mostra label/cor quando há uma conta selecionada vinda da API
   const accountLabel = currentAccount == null
     ? 'Selecionar'
@@ -98,10 +129,10 @@ export function ControlsSection() {
       : 'Conta Real'
 
   const accountColor = currentAccount == null
-    ? '#6b7280'                                     // cinza — sem conta
+    ? '#6b7280'
     : currentAccount.is_virtual
-      ? '#2ec7ff'                                   // azul — demo
-      : '#22c55e'                                   // verde — real
+      ? '#2ec7ff'
+      : '#22c55e'
 
   return (
     <div className="space-y-4">
@@ -124,7 +155,6 @@ export function ControlsSection() {
           {showAccountDropdown && (
             <div className="absolute top-full left-0 right-0 mt-2 bg-[#1e2535] rounded-xl shadow-xl border border-[#2a3142] py-1 z-50">
               {accounts.length === 0 ? (
-                // API não conectada ou sem contas — mostra mensagem
                 <p className="px-4 py-3 text-xs text-gray-500 text-center">
                   Nenhuma conta disponível
                 </p>
@@ -132,10 +162,7 @@ export function ControlsSection() {
                 accounts.map((account) => (
                   <button
                     key={account.account_id}
-                    onClick={() => {
-                      setCurrentAccount(account)
-                      setShowAccountDropdown(false)
-                    }}
+                    onClick={() => handleAccountSelect(account)}  // ← handler com loader
                     className={`w-full px-4 py-2.5 text-left text-sm hover:bg-[#2a3142] transition-colors ${
                       currentAccount?.account_id === account.account_id
                         ? 'text-[#22c55e]'
@@ -235,13 +262,11 @@ export function ControlsSection() {
 
           {/* Progress bar com círculos */}
           <div className="relative h-1 bg-[#2a3142] rounded-full">
-            {/* Barra de progresso animada */}
             <div
               className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500 ease-out"
               style={{ width: `${animatedProgress}%` }}
             />
 
-            {/* Círculos nos pontos */}
             {steps.map((_, index) => {
               const position = (index / (steps.length - 1)) * 100
               const isActive = index <= activeStep
