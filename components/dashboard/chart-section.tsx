@@ -1,45 +1,28 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import {
+  Chart,
+  BarElement,
+  CategoryScale,
+  LinearScale,
+  Tooltip,
+  Legend,
+  type Plugin,
+  type ChartData,
+} from 'chart.js'
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Register Chart.js modules ────────────────────────────────────────────────
+Chart.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
+// ── Constants ────────────────────────────────────────────────────────────────
 const SYMBOL       = '1HZ100V'
 const WS_URL       = 'wss://api.derivws.com/trading/v1/options/ws/public'
 const TICK_OPTIONS = [25, 50, 100, 250, 500, 1000]
-const DEFAULT_MAX  = 500
+const DEFAULT_MAX  = 25
 const MAX_LAST     = 20
 
-// Visual constants
-const SVG_H   = 240
-const PLOT_T  = 32   // top padding (for percentage labels)
-const PLOT_B  = 32   // bottom padding (for digit labels)
-const PLOT_H  = SVG_H - PLOT_T - PLOT_B
-const MAX_Y   = 35   // visual ceiling (%) — bars clip here but % label is still accurate
-
-const COL = {
-  normal:    '#9ca3af',
-  highlight: '#22c55e',
-  low:       '#dc2626',
-}
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-interface BarEntry {
-  digit:       number
-  count:       number
-  percentage:  number
-  isHighlight: boolean
-  isLow:       boolean
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Extract the last digit from a price string.
- * Uses the string representation to avoid floating-point issues.
- * e.g. "1234.56" → 6
- */
 function lastDigitFromQuote(quote: number): number {
   const str = String(quote)
   for (let i = str.length - 1; i >= 0; i--) {
@@ -49,127 +32,38 @@ function lastDigitFromQuote(quote: number): number {
   return 0
 }
 
-function buildBars(counts: number[], total: number): BarEntry[] {
-  let maxCount = 0
-  let minCount = Infinity
-  let maxIdx   = 0
-  let minIdx   = 0
-
-  for (let i = 0; i < 10; i++) {
-    if (counts[i] > maxCount) { maxCount = counts[i]; maxIdx = i }
-    if (counts[i] < minCount) { minCount = counts[i]; minIdx = i }
-  }
-
-  return Array.from({ length: 10 }, (_, d) => ({
-    digit:       d,
-    count:       counts[d],
-    percentage:  total > 0 ? (counts[d] / total) * 100 : 10,
-    isHighlight: d === maxIdx && total > 0,
-    isLow:       d === minIdx && total > 0 && minCount < maxCount,
-  }))
+function computePercentages(counts: number[], total: number): number[] {
+  return counts.map(c => (total > 0 ? (c / total) * 100 : 0))
 }
 
-// ── Bar Chart (RAF-driven, zero React re-renders inside) ──────────────────────
+function barColors(percentages: number[]): string[] {
+  return percentages.map(p => {
+    if (p >= 20) return '#1db954'  // green — high frequency
+    if (p <= 5)  return '#e63946'  // red   — low frequency
+    return '#b0b3b8'               // grey  — normal
+  })
+}
 
-function DigitBarChart({ barsRef }: { barsRef: React.MutableRefObject<BarEntry[]> }) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const rectRefs     = useRef<(SVGRectElement | null)[]>(Array(10).fill(null))
-  const pctRefs      = useRef<(SVGTextElement | null)[]>(Array(10).fill(null))
-  const lblRefs      = useRef<(SVGTextElement | null)[]>(Array(10).fill(null))
-  const widthRef     = useRef(360)
-  const smoothRef    = useRef<number[]>(Array(10).fill(10))
-  const rafRef       = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (!containerRef.current) return
-    const obs = new ResizeObserver(([e]) => { widthRef.current = e.contentRect.width })
-    obs.observe(containerRef.current)
-    return () => obs.disconnect()
-  }, [])
-
-  useEffect(() => {
-    const loop = () => {
-      const bars = barsRef.current
-      const W    = widthRef.current
-      const gap  = 8
-      const barW = Math.max(16, (W - gap * 11) / 10)
-
-      bars.forEach((bar, i) => {
-        const prev = smoothRef.current[i]
-        const next = prev + (bar.percentage - prev) * 0.08
-        smoothRef.current[i] = next
-
-        const barH = Math.min(PLOT_H - 4, Math.max(4, (Math.min(next, MAX_Y) / MAX_Y) * PLOT_H))
-        const x    = gap + i * (barW + gap)
-        const y    = PLOT_T + PLOT_H - barH
-        const fill = bar.isHighlight ? COL.highlight : bar.isLow ? COL.low : COL.normal
-
-        const rect = rectRefs.current[i]
-        if (rect) {
-          rect.setAttribute('x',      x.toFixed(1))
-          rect.setAttribute('y',      y.toFixed(1))
-          rect.setAttribute('width',  barW.toFixed(1))
-          rect.setAttribute('height', barH.toFixed(1))
-          rect.setAttribute('fill',   fill)
-        }
-
-        const ptxt = pctRefs.current[i]
-        if (ptxt) {
-          ptxt.setAttribute('x', (x + barW / 2).toFixed(1))
-          ptxt.setAttribute('y', Math.max(18, y - 6).toFixed(1))
-          ptxt.textContent = `${bar.percentage.toFixed(1)}%`
-          ptxt.setAttribute('fill', fill)
-        }
-
-        const ltxt = lblRefs.current[i]
-        if (ltxt) {
-          ltxt.setAttribute('x', (x + barW / 2).toFixed(1))
-        }
-      })
-
-      rafRef.current = requestAnimationFrame(loop)
-    }
-
-    rafRef.current = requestAnimationFrame(loop)
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
-  }, [barsRef])
-
-  return (
-    <div ref={containerRef} style={{ width: '100%', height: SVG_H }}>
-      <svg width="100%" height={SVG_H} style={{ overflow: 'visible' }}>
-        {Array.from({ length: 10 }, (_, i) => (
-          <g key={i}>
-            <rect ref={el => { rectRefs.current[i] = el }} rx="4" ry="4" />
-            <text
-              ref={el => { pctRefs.current[i] = el }}
-              textAnchor="middle" fontSize="11" fontWeight="600"
-            />
-          </g>
-        ))}
-
-        <line
-          x1="0" y1={PLOT_T + PLOT_H}
-          x2="100%" y2={PLOT_T + PLOT_H}
-          stroke="#3a4255" strokeWidth="1"
-        />
-
-        {Array.from({ length: 10 }, (_, i) => (
-          <text
-            key={`lbl${i}`}
-            ref={el => { lblRefs.current[i] = el }}
-            y={SVG_H - 8}
-            textAnchor="middle" fill="white" fontSize="14" fontWeight="700"
-          >
-            {i}
-          </text>
-        ))}
-      </svg>
-    </div>
-  )
+// ── Percentage label plugin ───────────────────────────────────────────────────
+const percentagePlugin: Plugin<'bar'> = {
+  id: 'percentagePlugin',
+  afterDatasetsDraw(chart) {
+    const { ctx, data } = chart
+    ctx.save()
+    data.datasets[0].data.forEach((value, index) => {
+      const meta = chart.getDatasetMeta(0)
+      const bar  = meta.data[index]
+      if (!bar || typeof value !== 'number') return
+      ctx.fillStyle   = '#fff'
+      ctx.font        = '10px Arial'
+      ctx.textAlign   = 'center'
+      ctx.fillText(`${value.toFixed(1)}%`, bar.x, bar.y - 5)
+    })
+    ctx.restore()
+  },
 }
 
 // ── Last Digits Strip ─────────────────────────────────────────────────────────
-
 function LastDigitsStrip({ digits }: { digits: number[] }) {
   return (
     <div className="flex items-center gap-1.5 overflow-hidden px-1">
@@ -201,35 +95,93 @@ function LastDigitsStrip({ digits }: { digits: number[] }) {
 }
 
 // ── Main Component ────────────────────────────────────────────────────────────
-
 export function ChartSection() {
   const [maxTicks,   setMaxTicks]   = useState(DEFAULT_MAX)
   const [isDropdown, setIsDropdown] = useState(false)
   const [lastDigits, setLastDigits] = useState<number[]>([])
   const [tickCount,  setTickCount]  = useState(0)
-  const [topDigit,   setTopDigit]   = useState<number | null>(null)
+  const [lastDigit,  setLastDigit]  = useState<number | null>(null)
 
-  // Mutable state for WS logic — no re-renders
+  // Mutable refs — no re-renders for hot path
+  const canvasRef  = useRef<HTMLCanvasElement | null>(null)
+  const chartRef   = useRef<Chart<'bar'> | null>(null)
   const countsRef  = useRef<number[]>(Array(10).fill(0))
-  const totalRef   = useRef(0)
   const queueRef   = useRef<number[]>([])
   const maxTickRef = useRef(maxTicks)
-  const barsRef    = useRef<BarEntry[]>(buildBars(Array(10).fill(0), 0))
   const wsRef      = useRef<WebSocket | null>(null)
 
-  // Keep maxTickRef in sync
+  // ── Build / destroy Chart.js instance ─────────────────────────────────────
+  useEffect(() => {
+    if (!canvasRef.current) return
+
+    const initialData: ChartData<'bar'> = {
+      labels: ['0','1','2','3','4','5','6','7','8','9'],
+      datasets: [{
+        data: Array(10).fill(0),
+        borderRadius: 6,
+        backgroundColor: Array(10).fill('#888'),
+      }],
+    }
+
+    chartRef.current = new Chart(canvasRef.current, {
+      type: 'bar',
+      data: initialData,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 200 },
+        plugins: {
+          legend:  { display: false },
+          tooltip: { enabled: false },
+        },
+        scales: {
+          x: {
+            ticks: { color: '#aaa', font: { size: 10 } },
+            grid:  { display: false },
+          },
+          y: {
+            display:      false,
+            beginAtZero:  true,
+            max:          40,
+          },
+        },
+      },
+      plugins: [percentagePlugin],
+    })
+
+    return () => {
+      chartRef.current?.destroy()
+      chartRef.current = null
+    }
+  }, [])
+
+  // ── Keep maxTickRef in sync + trim queue on window change ──────────────────
   useEffect(() => {
     maxTickRef.current = maxTicks
-    // Re-trim queue if window shrank
     const q = queueRef.current
+    const c = countsRef.current
     while (q.length > maxTicks) {
       const old = q.shift()!
-      countsRef.current[old]--
-      totalRef.current--
+      c[old]--
     }
-    barsRef.current = buildBars(countsRef.current, totalRef.current)
+    const total = q.length
+    const pcts  = computePercentages(c, total)
+    updateChart(pcts)
+    setTickCount(total)
   }, [maxTicks])
 
+  // ── Chart.js update helper ─────────────────────────────────────────────────
+  const updateChart = useCallback((percentages: number[]) => {
+    const chart = chartRef.current
+    if (!chart) return
+    const maxValue = Math.max(...percentages)
+    ;(chart.options.scales!.y as { max: number }).max = maxValue + 10
+    chart.data.datasets[0].data            = percentages
+    chart.data.datasets[0].backgroundColor = barColors(percentages) as unknown as string
+    chart.update()
+  }, [])
+
+  // ── WebSocket connection ───────────────────────────────────────────────────
   const connectWS = useCallback(() => {
     if (wsRef.current) wsRef.current.close()
 
@@ -252,68 +204,60 @@ export function ChartSection() {
       const q     = queueRef.current
       const c     = countsRef.current
 
-      // Sliding window
+      // Sliding window FIFO
       q.push(digit)
       c[digit]++
-      totalRef.current++
 
       if (q.length > maxTickRef.current) {
         const old = q.shift()!
         c[old]--
-        totalRef.current--
       }
 
-      // Update bars ref (read by RAF — no setState)
-      const bars = buildBars(c, totalRef.current)
-      barsRef.current = bars
+      const total = q.length
+      const pcts  = computePercentages(c, total)
+      updateChart(pcts)
 
-      // Minimal React state updates (just counters + strip)
-      const hi = bars.find(b => b.isHighlight)?.digit ?? null
-      setTopDigit(hi)
-      setTickCount(totalRef.current)
+      // Minimal React state (UI counters + strip only)
+      setLastDigit(digit)
+      setTickCount(total)
       setLastDigits(prev => {
         const next = [...prev, digit]
         return next.length > MAX_LAST ? next.slice(-MAX_LAST) : next
       })
     }
 
-    ws.onerror = () => console.error('Deriv WS error')
+    ws.onerror = () => console.error('Deriv WS connection error')
     ws.onclose = () => {
       if (wsRef.current === ws) setTimeout(connectWS, 3000)
     }
-  }, [])
+  }, [updateChart])
 
-  // Mount → connect; unmount → close
+  // ── Mount → connect; unmount → close ──────────────────────────────────────
   useEffect(() => {
     connectWS()
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close()
-        wsRef.current = null
-      }
+      wsRef.current?.close()
+      wsRef.current = null
     }
   }, [connectWS])
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="bg-[#131825] rounded-xl border border-[#2a3142] overflow-hidden">
 
       {/* ── Header ── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a3142]">
 
-        {/* Symbol + tick count */}
-        <div className="flex items-center gap-2">
+        {/* Last digit + tick count */}
+        <div className="flex items-center gap-3">
           <span className="text-gray-400 text-xs font-mono">{SYMBOL}</span>
-          <span className="text-gray-600 text-xs">{tickCount} ticks</span>
-        </div>
-
-        {/* Most frequent digit */}
-        <div className="flex items-center gap-2">
-          <span className="text-white font-semibold text-sm tracking-wide">
-            Mais frequente:
+          <span className="text-gray-400 text-xs">
+            Last Digit:{' '}
+            <span className="text-white font-bold text-sm">
+              {lastDigit !== null ? lastDigit : '-'}
+            </span>
           </span>
-          {topDigit !== null && (
-            <span className="text-[#22c55e] font-bold text-xl">{topDigit}</span>
-          )}
+          <span className="text-gray-600 text-xs">{tickCount} ticks</span>
         </div>
 
         {/* Tick window selector */}
@@ -349,8 +293,8 @@ export function ChartSection() {
       </div>
 
       {/* ── Chart ── */}
-      <div className="px-3 py-2">
-        <DigitBarChart barsRef={barsRef} />
+      <div className="px-3 py-2" style={{ height: 200 }}>
+        <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} />
       </div>
 
       {/* ── Last Digits Strip ── */}
