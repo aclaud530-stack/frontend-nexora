@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Chart,
+  BarController,
   BarElement,
   CategoryScale,
   LinearScale,
@@ -15,7 +16,7 @@ import {
 } from 'chart.js'
 
 // ── Register Chart.js modules ────────────────────────────────────────────────
-Chart.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
+Chart.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const SYMBOL       = '1HZ100V'
