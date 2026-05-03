@@ -22,8 +22,12 @@ Chart.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip, L
 const SYMBOL       = '1HZ100V'
 const WS_URL       = 'wss://api.derivws.com/trading/v1/options/ws/public'
 const TICK_OPTIONS = [25, 50, 100, 250, 500, 1000]
-const DEFAULT_MAX  = 25
+const DEFAULT_MAX  = 500   // large window → all bars always move
 const MAX_LAST     = 20
+
+// Smoothing: how fast bars animate toward target (0.0 = frozen, 1.0 = instant)
+// 0.12 = smooth but snappy enough for fast trading analysis
+const SMOOTH_FACTOR = 0.12
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function lastDigitFromQuote(quote: number): number {
@@ -36,14 +40,18 @@ function lastDigitFromQuote(quote: number): number {
 }
 
 function computePercentages(counts: number[], total: number): number[] {
-  return counts.map(c => (total > 0 ? (c / total) * 100 : 0))
+  // Always return 10 values so every bar has a non-zero base to animate from
+  if (total === 0) return Array(10).fill(10) // equal distribution when no data yet
+  return counts.map(c => (c / total) * 100)
 }
 
 function barColors(percentages: number[]): string[] {
+  const max = Math.max(...percentages)
+  const min = Math.min(...percentages)
   return percentages.map(p => {
-    if (p >= 20) return '#1db954'
-    if (p <= 5)  return '#e63946'
-    return '#b0b3b8'
+    if (p === max) return '#1db954'  // highest — green
+    if (p === min) return '#e63946'  // lowest  — red
+    return '#4a5568'                  // normal  — neutral grey
   })
 }
 
@@ -57,10 +65,11 @@ const percentagePlugin: Plugin<'bar'> = {
       const meta = chart.getDatasetMeta(0)
       const bar  = meta.data[index]
       if (!bar || typeof value !== 'number') return
-      ctx.fillStyle  = '#fff'
-      ctx.font       = '10px Arial'
-      ctx.textAlign  = 'center'
-      ctx.fillText(`${value.toFixed(1)}%`, bar.x, bar.y - 5)
+      ctx.fillStyle   = '#e2e8f0'
+      ctx.font        = 'bold 10px monospace'
+      ctx.textAlign   = 'center'
+      ctx.textBaseline = 'bottom'
+      ctx.fillText(`${value.toFixed(1)}%`, bar.x, bar.y - 2)
     })
     ctx.restore()
   },
@@ -80,7 +89,7 @@ function LastDigitsStrip({ digits }: { digits: number[] }) {
               key={i}
               className={`
                 inline-flex items-center justify-center rounded font-bold tabular-nums
-                transition-all duration-300
+                transition-all duration-150
                 ${isNewest
                   ? 'w-7 h-7 text-sm bg-[#22c55e]/20 text-[#22c55e] border border-[#22c55e]/50 scale-110'
                   : 'w-6 h-6 text-xs bg-[#1e2535] text-gray-300 border border-[#2a3142]'
@@ -104,44 +113,54 @@ export function ChartSection() {
   const [lastDigits, setLastDigits] = useState<number[]>([])
   const [tickCount,  setTickCount]  = useState(0)
   const [lastDigit,  setLastDigit]  = useState<number | null>(null)
+  const canvasRef    = useRef<HTMLCanvasElement | null>(null)
+  const chartRef     = useRef<Chart<'bar'> | null>(null)
+  const countsRef    = useRef<number[]>(Array(10).fill(0))
+  const queueRef     = useRef<number[]>([])
+  const maxTickRef   = useRef(maxTicks)
+  const wsRef        = useRef<WebSocket | null>(null)
+  const rafRef       = useRef<number | null>(null)
+  const smoothRef    = useRef<number[]>(Array(10).fill(10)) // start at equal 10%
+  const targetRef    = useRef<number[]>(Array(10).fill(10))
+  const reconnTimRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const canvasRef  = useRef<HTMLCanvasElement | null>(null)
-  const chartRef   = useRef<Chart<'bar'> | null>(null)
-  const countsRef  = useRef<number[]>(Array(10).fill(0))
-  const queueRef   = useRef<number[]>([])
-  const maxTickRef = useRef(maxTicks)
-  const wsRef      = useRef<WebSocket | null>(null)
-
-  // ── Build / destroy Chart.js instance ─────────────────────────────────────
+  // ── Build Chart.js instance ──────────────────────────────────────────────
   useEffect(() => {
     if (!canvasRef.current) return
 
     const initialData: ChartData<'bar'> = {
       labels: ['0','1','2','3','4','5','6','7','8','9'],
       datasets: [{
-        data: Array(10).fill(0) as number[],
-        borderRadius: 6,
-        backgroundColor: Array(10).fill('#888') as string[],
+        data: Array(10).fill(10) as number[],
+        borderRadius: 4,
+        borderSkipped: false,
+        backgroundColor: Array(10).fill('#4a5568') as string[],
+        // No Chart.js animation — we drive it ourselves via RAF
+        animation: false as unknown as object,
       }],
     }
 
-    // Explicit generic <'bar'> on both the config type and the constructor
-    // avoids the "keyof ChartTypeRegistry is not assignable to 'bar'" TS error
     const config: ChartConfiguration<'bar'> = {
       type: 'bar',
       data: initialData,
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: { duration: 200 },
+        // Disable all Chart.js animations — RAF loop handles smoothing
+        animation: false,
+        transitions: {},
         plugins: {
           legend:  { display: false },
           tooltip: { enabled: false },
         },
         scales: {
           x: {
-            ticks: { color: '#aaa', font: { size: 10 } },
-            grid:  { display: false },
+            ticks: {
+              color: '#94a3b8',
+              font: { size: 11, weight: 'bold', family: 'monospace' },
+            },
+            grid: { display: false },
+            border: { display: false },
           },
           y: {
             display:     false,
@@ -161,17 +180,52 @@ export function ChartSection() {
     }
   }, [])
 
-  // ── Chart.js update helper ─────────────────────────────────────────────────
-  const updateChart = useCallback((percentages: number[]) => {
-    const chart = chartRef.current
-    if (!chart) return
-    const maxValue = Math.max(...percentages)
-    // Cast to concrete scale type to set max dynamically
-    const yScale = chart.options.scales?.y as (Partial<LinearScaleOptions> & { max?: number }) | undefined
-    if (yScale) yScale.max = maxValue + 10
-    chart.data.datasets[0].data            = percentages
-    chart.data.datasets[0].backgroundColor = barColors(percentages) as string[]
-    chart.update()
+  // ── RAF smoothing loop — runs independently of React renders ─────────────
+  useEffect(() => {
+    const loop = () => {
+      const chart = chartRef.current
+      if (chart) {
+        const smooth  = smoothRef.current
+        const targets = targetRef.current
+        let   dirty   = false
+
+        for (let i = 0; i < 10; i++) {
+          const diff = targets[i] - smooth[i]
+          // Only update if delta is meaningful (avoids infinite micro-updates)
+          if (Math.abs(diff) > 0.005) {
+            smooth[i] += diff * SMOOTH_FACTOR
+            dirty = true
+          } else {
+            smooth[i] = targets[i]
+          }
+        }
+
+        if (dirty) {
+          const maxVal = Math.max(...smooth)
+          const minVal = Math.min(...smooth)
+
+          chart.data.datasets[0].data = [...smooth]
+          chart.data.datasets[0].backgroundColor = smooth.map(v => {
+            if (Math.abs(v - maxVal) < 0.01) return '#1db954'
+            if (Math.abs(v - minVal) < 0.01) return '#e63946'
+            return '#4a5568'
+          }) as string[]
+
+          // Dynamic Y ceiling: keeps bars from touching the top
+          const yScale = chart.options.scales?.y as (Partial<LinearScaleOptions> & { max?: number }) | undefined
+          if (yScale) yScale.max = maxVal + 8
+
+          chart.update('none') // 'none' = skip Chart.js animation, just redraw
+        }
+      }
+
+      rafRef.current = requestAnimationFrame(loop)
+    }
+
+    rafRef.current = requestAnimationFrame(loop)
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
   }, [])
 
   // ── Keep maxTickRef in sync + trim queue on window change ──────────────────
@@ -184,20 +238,43 @@ export function ChartSection() {
       c[old]--
     }
     const total = q.length
-    updateChart(computePercentages(c, total))
+    targetRef.current = computePercentages(c, total)
     setTickCount(total)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [maxTicks])
 
-  // ── WebSocket connection ───────────────────────────────────────────────────
+  // ── WebSocket — persistent, auto-reconnect ─────────────────────────────────
   const connectWS = useCallback(() => {
-    if (wsRef.current) wsRef.current.close()
+    // Clear any pending reconnect timer
+    if (reconnTimRef.current) {
+      clearTimeout(reconnTimRef.current)
+      reconnTimRef.current = null
+    }
+
+    // Close existing socket cleanly
+    if (wsRef.current) {
+      wsRef.current.onclose = null  // prevent reconnect loop on manual close
+      wsRef.current.close()
+      wsRef.current = null
+    }
 
     const ws = new WebSocket(WS_URL)
     wsRef.current = ws
 
     ws.onopen = () => {
+      // Subscribe to real-time ticks
       ws.send(JSON.stringify({ ticks: SYMBOL, subscribe: 1, req_id: 1 }))
+
+      // Keep-alive ping every 30s (Deriv closes idle connections)
+      const pingId = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ ping: 1 }))
+        } else {
+          clearInterval(pingId)
+        }
+      }, 30_000)
+
+      // Store pingId so we can clear on close
+      ;(ws as WebSocket & { _pingId?: ReturnType<typeof setInterval> })._pingId = pingId
     }
 
     ws.onmessage = (e) => {
@@ -208,15 +285,18 @@ export function ChartSection() {
       }
 
       if (data.error) {
-        console.error('Deriv WS error:', data.error.message)
+        console.error('[Deriv WS] error:', data.error.message)
         return
       }
+
+      // Ignore pong and subscription confirmation
       if (data.msg_type !== 'tick' || !data.tick) return
 
       const digit = lastDigitFromQuote(data.tick.quote)
       const q     = queueRef.current
       const c     = countsRef.current
 
+      // FIFO sliding window
       q.push(digit)
       c[digit]++
 
@@ -226,8 +306,11 @@ export function ChartSection() {
       }
 
       const total = q.length
-      updateChart(computePercentages(c, total))
 
+      // Push new targets to RAF loop — all 10 bars get new values every tick
+      targetRef.current = computePercentages(c, total)
+
+      // Minimal React state updates (only UI labels)
       setLastDigit(digit)
       setTickCount(total)
       setLastDigits(prev => {
@@ -236,18 +319,32 @@ export function ChartSection() {
       })
     }
 
-    ws.onerror = () => console.error('Deriv WS connection error')
-    ws.onclose = () => {
-      if (wsRef.current === ws) setTimeout(connectWS, 3000)
+    ws.onerror = (err) => {
+      console.error('[Deriv WS] connection error', err)
     }
-  }, [updateChart])
+
+    ws.onclose = () => {
+      const ws_ = ws as WebSocket & { _pingId?: ReturnType<typeof setInterval> }
+      if (ws_._pingId) clearInterval(ws_._pingId)
+
+      // Only reconnect if this is still the active socket
+      if (wsRef.current === ws) {
+        console.warn('[Deriv WS] disconnected — reconnecting in 2s…')
+        reconnTimRef.current = setTimeout(connectWS, 2_000)
+      }
+    }
+  }, [])
 
   // ── Mount → connect; unmount → close ──────────────────────────────────────
   useEffect(() => {
     connectWS()
     return () => {
-      wsRef.current?.close()
-      wsRef.current = null
+      if (reconnTimRef.current) clearTimeout(reconnTimRef.current)
+      if (wsRef.current) {
+        wsRef.current.onclose = null
+        wsRef.current.close()
+        wsRef.current = null
+      }
     }
   }, [connectWS])
 
@@ -258,14 +355,8 @@ export function ChartSection() {
       {/* ── Header ── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a3142]">
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <span className="text-gray-400 text-xs font-mono">{SYMBOL}</span>
-          <span className="text-gray-400 text-xs">
-            Last Digit:{' '}
-            <span className="text-white font-bold text-sm">
-              {lastDigit !== null ? lastDigit : '-'}
-            </span>
-          </span>
           <span className="text-gray-600 text-xs">{tickCount} ticks</span>
         </div>
 
@@ -302,7 +393,7 @@ export function ChartSection() {
       </div>
 
       {/* ── Chart ── */}
-      <div className="px-3 py-2" style={{ height: 200 }}>
+      <div className="px-3 py-2" style={{ height: 210 }}>
         <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} />
       </div>
 
