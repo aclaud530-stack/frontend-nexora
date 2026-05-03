@@ -10,6 +10,8 @@ import {
   Legend,
   type Plugin,
   type ChartData,
+  type ChartConfiguration,
+  type LinearScaleOptions,
 } from 'chart.js'
 
 // ── Register Chart.js modules ────────────────────────────────────────────────
@@ -38,9 +40,9 @@ function computePercentages(counts: number[], total: number): number[] {
 
 function barColors(percentages: number[]): string[] {
   return percentages.map(p => {
-    if (p >= 20) return '#1db954'  // green — high frequency
-    if (p <= 5)  return '#e63946'  // red   — low frequency
-    return '#b0b3b8'               // grey  — normal
+    if (p >= 20) return '#1db954'
+    if (p <= 5)  return '#e63946'
+    return '#b0b3b8'
   })
 }
 
@@ -54,9 +56,9 @@ const percentagePlugin: Plugin<'bar'> = {
       const meta = chart.getDatasetMeta(0)
       const bar  = meta.data[index]
       if (!bar || typeof value !== 'number') return
-      ctx.fillStyle   = '#fff'
-      ctx.font        = '10px Arial'
-      ctx.textAlign   = 'center'
+      ctx.fillStyle  = '#fff'
+      ctx.font       = '10px Arial'
+      ctx.textAlign  = 'center'
       ctx.fillText(`${value.toFixed(1)}%`, bar.x, bar.y - 5)
     })
     ctx.restore()
@@ -102,7 +104,6 @@ export function ChartSection() {
   const [tickCount,  setTickCount]  = useState(0)
   const [lastDigit,  setLastDigit]  = useState<number | null>(null)
 
-  // Mutable refs — no re-renders for hot path
   const canvasRef  = useRef<HTMLCanvasElement | null>(null)
   const chartRef   = useRef<Chart<'bar'> | null>(null)
   const countsRef  = useRef<number[]>(Array(10).fill(0))
@@ -117,13 +118,15 @@ export function ChartSection() {
     const initialData: ChartData<'bar'> = {
       labels: ['0','1','2','3','4','5','6','7','8','9'],
       datasets: [{
-        data: Array(10).fill(0),
+        data: Array(10).fill(0) as number[],
         borderRadius: 6,
-        backgroundColor: Array(10).fill('#888'),
+        backgroundColor: Array(10).fill('#888') as string[],
       }],
     }
 
-    chartRef.current = new Chart(canvasRef.current, {
+    // Explicit generic <'bar'> on both the config type and the constructor
+    // avoids the "keyof ChartTypeRegistry is not assignable to 'bar'" TS error
+    const config: ChartConfiguration<'bar'> = {
       type: 'bar',
       data: initialData,
       options: {
@@ -140,19 +143,34 @@ export function ChartSection() {
             grid:  { display: false },
           },
           y: {
-            display:      false,
-            beginAtZero:  true,
-            max:          40,
+            display:     false,
+            beginAtZero: true,
+            max:         40,
           },
         },
       },
       plugins: [percentagePlugin],
-    })
+    }
+
+    chartRef.current = new Chart<'bar'>(canvasRef.current, config)
 
     return () => {
       chartRef.current?.destroy()
       chartRef.current = null
     }
+  }, [])
+
+  // ── Chart.js update helper ─────────────────────────────────────────────────
+  const updateChart = useCallback((percentages: number[]) => {
+    const chart = chartRef.current
+    if (!chart) return
+    const maxValue = Math.max(...percentages)
+    // Cast to concrete scale type to set max dynamically
+    const yScale = chart.options.scales?.y as (Partial<LinearScaleOptions> & { max?: number }) | undefined
+    if (yScale) yScale.max = maxValue + 10
+    chart.data.datasets[0].data            = percentages
+    chart.data.datasets[0].backgroundColor = barColors(percentages) as string[]
+    chart.update()
   }, [])
 
   // ── Keep maxTickRef in sync + trim queue on window change ──────────────────
@@ -165,21 +183,10 @@ export function ChartSection() {
       c[old]--
     }
     const total = q.length
-    const pcts  = computePercentages(c, total)
-    updateChart(pcts)
+    updateChart(computePercentages(c, total))
     setTickCount(total)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [maxTicks])
-
-  // ── Chart.js update helper ─────────────────────────────────────────────────
-  const updateChart = useCallback((percentages: number[]) => {
-    const chart = chartRef.current
-    if (!chart) return
-    const maxValue = Math.max(...percentages)
-    ;(chart.options.scales!.y as { max: number }).max = maxValue + 10
-    chart.data.datasets[0].data            = percentages
-    chart.data.datasets[0].backgroundColor = barColors(percentages) as unknown as string
-    chart.update()
-  }, [])
 
   // ── WebSocket connection ───────────────────────────────────────────────────
   const connectWS = useCallback(() => {
@@ -193,18 +200,22 @@ export function ChartSection() {
     }
 
     ws.onmessage = (e) => {
-      const data = JSON.parse(e.data)
+      const data = JSON.parse(e.data as string) as {
+        error?:    { message: string }
+        msg_type?: string
+        tick?:     { quote: number }
+      }
+
       if (data.error) {
         console.error('Deriv WS error:', data.error.message)
         return
       }
-      if (data.msg_type !== 'tick') return
+      if (data.msg_type !== 'tick' || !data.tick) return
 
       const digit = lastDigitFromQuote(data.tick.quote)
       const q     = queueRef.current
       const c     = countsRef.current
 
-      // Sliding window FIFO
       q.push(digit)
       c[digit]++
 
@@ -214,10 +225,8 @@ export function ChartSection() {
       }
 
       const total = q.length
-      const pcts  = computePercentages(c, total)
-      updateChart(pcts)
+      updateChart(computePercentages(c, total))
 
-      // Minimal React state (UI counters + strip only)
       setLastDigit(digit)
       setTickCount(total)
       setLastDigits(prev => {
@@ -248,7 +257,6 @@ export function ChartSection() {
       {/* ── Header ── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a3142]">
 
-        {/* Last digit + tick count */}
         <div className="flex items-center gap-3">
           <span className="text-gray-400 text-xs font-mono">{SYMBOL}</span>
           <span className="text-gray-400 text-xs">
