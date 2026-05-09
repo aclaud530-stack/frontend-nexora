@@ -139,7 +139,7 @@ export function BotsProvider({ children }: { children: ReactNode }) {
 
       // MartingaleStrategy → emite bot:trade_opened
       case 'bot:trade_opened': {
-        const p = payload as TradeOpenedPayload
+        const p = payload as unknown as TradeOpenedPayload
         if (!p?.contractId) break
         const { name, strategy } = getBotMeta(botId)
         const rec: TradeRecord = {
@@ -155,7 +155,7 @@ export function BotsProvider({ children }: { children: ReactNode }) {
       // BaseStrategy.recordTradeResult() → emite bot:trade_closed
       // payload: { contractId, profit, won, stake }
       case 'bot:trade_closed': {
-        const p = payload as TradeClosedPayload
+        const p = payload as unknown as TradeClosedPayload
         if (!p?.contractId) break
         const { name, strategy } = getBotMeta(botId)
         const rec: TradeRecord = {
