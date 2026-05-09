@@ -43,32 +43,49 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
 
   // ── Processar mensagem ───────────────────────────────────────
   const handleMessage = useCallback((raw: string) => {
+    let msg: { type?: string; payload?: unknown } = {}
     try {
-      const msg = JSON.parse(raw) as { type: string; payload: unknown }
+      msg = JSON.parse(raw)
+    } catch (e) {
+      console.error('[NexoraWS] JSON inválido:', e, raw)
+      return
+    }
 
+    // Ignorar mensagens sem type (heartbeats, etc.)
+    if (!msg?.type) return
+
+    const payload = msg.payload ?? {}
+
+    try {
       switch (msg.type as BackendMsgType) {
         case 'bots_list':
-          cbRef.current.onBotsLoaded?.(msg.payload as BotSummary[])
+          cbRef.current.onBotsLoaded?.(payload as BotSummary[])
           break
 
         case 'bot_created':
-          cbRef.current.onBotCreated?.(msg.payload as BotState)
+          cbRef.current.onBotCreated?.(payload as BotState)
           break
 
         case 'bot_logs': {
-          const p = msg.payload as { botId: string; logs: BotLogEntry[] }
-          cbRef.current.onBotLogs?.(p.botId, p.logs)
+          const p = payload as { botId?: string; logs?: BotLogEntry[] }
+          if (p.botId && p.logs) cbRef.current.onBotLogs?.(p.botId, p.logs)
           break
         }
 
         // BotManager emite 'bot_event' com payload = BotEvent
         case 'bot_event':
-          cbRef.current.onBotEvent?.(msg.payload as BotEvent)
+          cbRef.current.onBotEvent?.(payload as BotEvent)
           break
 
-        case 'error':
-          cbRef.current.onError?.((msg.payload as { message?: string }).message ?? 'Erro')
+        case 'error': {
+          const p = payload as Record<string, unknown>
+          const errMsg = typeof p?.message === 'string' ? p.message
+                       : typeof p?.error   === 'string' ? p.error
+                       : typeof payload    === 'string' ? payload
+                       : 'Erro desconhecido'
+          cbRef.current.onError?.(errMsg)
           break
+        }
 
         case 'pong':
           break
@@ -76,15 +93,18 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
         default:
           // Compatibilidade: server.ts pode emitir BotEventType directamente
           if ((msg.type as string).startsWith('bot:')) {
+            const p = (payload ?? {}) as Record<string, unknown>
             cbRef.current.onBotEvent?.({
               type:    msg.type as BotEventType,
-              botId:   (msg.payload as Record<string, string>).botId ?? '',
-              payload: msg.payload as Record<string, unknown>,
+              botId:   typeof p.botId === 'string' ? p.botId : '',
+              payload: p,
             })
+          } else {
+            console.debug('[NexoraWS] mensagem desconhecida:', msg.type, payload)
           }
       }
     } catch (e) {
-      console.error('[NexoraWS] parse error:', e)
+      console.error('[NexoraWS] erro ao processar mensagem:', msg.type, e)
     }
   }, [])
 
