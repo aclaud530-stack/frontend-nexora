@@ -3,13 +3,12 @@
 import { ReactNode, useMemo } from 'react'
 import { AuthProvider, useAuth } from '@/lib/auth-context'
 import { TradingProvider } from '@/lib/trading-context'
+import { BotsProvider } from '@/lib/bots-context'
 import { LoaderProvider } from '@/components/loader'
 
 function TradingProviderWithAuth({ children }: { children: ReactNode }) {
   const { isLoading, currentAccount } = useAuth()
 
-  // ✅ useMemo evita recriar os valores em cada render
-  // → o useEffect de credenciais no TradingProvider não dispara em loop
   const { oauthToken, accountId } = useMemo(() => {
     if (isLoading || typeof window === 'undefined') {
       return { oauthToken: '', accountId: '' }
@@ -32,7 +31,9 @@ export function Providers({ children }: { children: ReactNode }) {
     <AuthProvider>
       <LoaderProvider>
         <TradingProviderWithAuth>
-          {children}
+          <BotsProvider>
+            {children}
+          </BotsProvider>
         </TradingProviderWithAuth>
       </LoaderProvider>
     </AuthProvider>
