@@ -6,35 +6,10 @@ import { ChartSection }     from '@/components/dashboard/chart-section'
 import { BalanceCard }      from '@/components/dashboard/balance-card'
 import { ControlsSection }  from '@/components/dashboard/controls-section'
 import { TradesTable }      from '@/components/dashboard/trades-table'
-import { BotsPanel }        from '@/components/bots/bots-panel'
 import { Footer }           from '@/components/dashboard/footer'
 import { useAuth }          from '@/lib/auth-context'
 import { useLoader }        from '@/components/loader'
 import { useTrading }       from '@/lib/trading-context'
-
-// ── Ícones de tab ─────────────────────────────────────────────────────────────
-
-function ChartIcon({ active }: { active: boolean }) {
-  return (
-    <svg width="14" height="14" viewBox="0 0 20 20" fill="none"
-      stroke={active ? '#2ec7ff' : 'currentColor'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M2 16l5-5 4 4 7-9" />
-    </svg>
-  )
-}
-
-function BotIcon({ active }: { active: boolean }) {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-      stroke={active ? '#2ec7ff' : 'currentColor'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="11" width="18" height="10" rx="2" />
-      <circle cx="12" cy="5" r="2" />
-      <line x1="12" y1="7" x2="12" y2="11" />
-      <line x1="8" y1="15" x2="8" y2="17" />
-      <line x1="16" y1="15" x2="16" y2="17" />
-    </svg>
-  )
-}
 
 // ── Loader ────────────────────────────────────────────────────────────────────
 
@@ -86,37 +61,6 @@ function DashboardLoader() {
   )
 }
 
-// ── Tabs do painel lateral ────────────────────────────────────────────────────
-
-type PanelTab = 'trades' | 'bots'
-
-function PanelTabs({ active, onChange, botsCount }: {
-  active:   PanelTab
-  onChange: (t: PanelTab) => void
-  botsCount: number
-}) {
-  return (
-    <div className="flex items-center gap-1 border-b border-[#1a1f2e] shrink-0 px-4 pt-1">
-      {(['trades', 'bots'] as PanelTab[]).map(tab => (
-        <button
-          key={tab}
-          onClick={() => onChange(tab)}
-          className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition-colors -mb-px ${
-            active === tab
-              ? 'border-[#2ec7ff] text-[#2ec7ff]'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          {tab === 'trades'
-            ? <><ChartIcon active={active === tab} /> Trades</>
-            : <><BotIcon   active={active === tab} /> Bots {botsCount > 0 && <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${active === tab ? 'bg-[#2ec7ff]/20 text-[#2ec7ff]' : 'bg-[#2a3142] text-gray-400'}`}>{botsCount}</span>}</>
-          }
-        </button>
-      ))}
-    </div>
-  )
-}
-
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 
 export default function TradingDashboard() {
@@ -125,10 +69,6 @@ export default function TradingDashboard() {
   const { isConnected, loading: tradingLoading } = useTrading()
   const { show, complete }                  = useLoader()
 
-  const [desktopTab, setDesktopTab] = useState<PanelTab>('trades')
-  const [mobileTab,  setMobileTab]  = useState<PanelTab>('trades')
-  const [botsCount,  setBotsCount]  = useState(0)   // actualizado pelo BotsPanel via contexto
-
   const showLoader = authLoading || tradingLoading
 
   useEffect(() => {
@@ -136,13 +76,6 @@ export default function TradingDashboard() {
     if (!token) { show('A redirecionar...'); router.push('/'); return }
     if (!authLoading) complete('Pronto!')
   }, [authLoading, router, show, complete])
-
-  // Importar useBots apenas para o contador de bots
-  // (o BotsProvider está no providers.tsx)
-  useEffect(() => {
-    // Actualizar o botsCount através do evento de storage
-    // Alternativa simples: o BotsPanel chama um callback
-  }, [])
 
   if (authLoading) return <DashboardLoader />
 
@@ -185,43 +118,23 @@ export default function TradingDashboard() {
           <Footer />
         </div>
 
-        {/* Coluna direita — tabs Trades / Bots */}
+        {/* Coluna direita — trades */}
         <div className="w-[380px] xl:w-[450px] 2xl:w-[500px] flex flex-col border-l-2 border-[#1a1f2e]">
-          <PanelTabs active={desktopTab} onChange={setDesktopTab} botsCount={botsCount} />
-
           <div className="flex-1 min-h-0 overflow-hidden">
-            {desktopTab === 'trades' ? (
-              <TradesTable />
-            ) : (
-              <div className="h-full overflow-y-auto p-4">
-                <BotsPanel onBotsCountChange={setBotsCount} />
-              </div>
-            )}
+            <TradesTable />
           </div>
         </div>
       </main>
 
       {/* ── Mobile Layout ── */}
       <main className="lg:hidden flex-1 flex flex-col min-h-0 overflow-hidden">
-
-        {/* Tabs no topo — mobile */}
-        <div className="shrink-0">
-          <PanelTabs active={mobileTab} onChange={setMobileTab} botsCount={botsCount} />
-        </div>
-
         <div className="flex-1 overflow-y-auto p-2.5 sm:p-3 space-y-2.5 sm:space-y-3">
           <ChartSection />
           <BalanceCard />
           <ControlsSection />
-
-          {mobileTab === 'trades' ? (
-            <div className="min-h-[200px] max-h-[300px] sm:max-h-[350px]">
-              <TradesTable />
-            </div>
-          ) : (
-            <BotsPanel onBotsCountChange={setBotsCount} />
-          )}
-
+          <div className="min-h-[200px] max-h-[300px] sm:max-h-[350px]">
+            <TradesTable />
+          </div>
           <Footer />
         </div>
       </main>
