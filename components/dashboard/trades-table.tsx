@@ -9,7 +9,6 @@ import { useState, useMemo } from 'react'
 import { useBots, TradeRecord } from '@/lib/bots-context'
 import { STRATEGY_LABELS } from '@/lib/nexora.types'
 
-// ─── Icons ────────────────────────────────────────────────────
 function TrashIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -49,37 +48,32 @@ function LiveBadge() {
   )
 }
 
-// ─── Tipos de tab ─────────────────────────────────────────────
 type MainTab   = 'trader' | 'notificacoes'
 type TraderTab = 'bots' | 'logs'
 
-// ─── Componente ───────────────────────────────────────────────
 export function TradesTable() {
-  const { bots, trades, botTrades, openTrades, botLogs, clearTrades, getBotLogs } = useBots()
+  // sessionBots substitui bots
+  const { sessionBots, trades, botTrades, openTrades, botLogs, clearTrades, getBotLogs } = useBots()
 
-  const [mainTab,      setMainTab]      = useState<MainTab>('trader')
-  const [traderTab,    setTraderTab]    = useState<TraderTab>('bots')
+  const [mainTab,       setMainTab]       = useState<MainTab>('trader')
+  const [traderTab,     setTraderTab]     = useState<TraderTab>('bots')
   const [selectedBotId, setSelectedBotId] = useState<string | 'all'>('all')
-  const [logBotId,     setLogBotId]     = useState<string>('')
+  const [logBotId,      setLogBotId]      = useState<string>('')
 
-  // Bots com actividade
-  const activeBots = useMemo(() => bots.filter(b => b.stats.totalTrades > 0 || b.status === 'running'), [bots])
-  const runningBots = useMemo(() => bots.filter(b => b.status === 'running'), [bots])
+  const activeBots  = useMemo(() => sessionBots.filter(b => b.stats.totalTrades > 0 || b.status === 'running'), [sessionBots])
+  const runningBots = useMemo(() => sessionBots.filter(b => b.status === 'running'), [sessionBots])
 
-  // Trades exibidos (todos ou por bot)
   const displayTrades = useMemo<TradeRecord[]>(() => {
     if (selectedBotId === 'all') return trades
     return botTrades[selectedBotId] ?? []
   }, [trades, botTrades, selectedBotId])
 
-  // Contratos actualmente abertos (pendentes)
   const openList = useMemo(() => Object.values(openTrades), [openTrades])
 
-  // Totais
   const totalTrades = useMemo(() => activeBots.reduce((s, b) => s + b.stats.totalTrades, 0), [activeBots])
-  const totalPnL    = useMemo(() => activeBots.reduce((s, b) => s + b.stats.netPnL, 0), [activeBots])
-  const totalWins   = useMemo(() => activeBots.reduce((s, b) => s + b.stats.wins, 0), [activeBots])
-  const totalLosses = useMemo(() => activeBots.reduce((s, b) => s + b.stats.losses, 0), [activeBots])
+  const totalPnL    = useMemo(() => activeBots.reduce((s, b) => s + b.stats.netPnL,      0), [activeBots])
+  const totalWins   = useMemo(() => activeBots.reduce((s, b) => s + b.stats.wins,         0), [activeBots])
+  const totalLosses = useMemo(() => activeBots.reduce((s, b) => s + b.stats.losses,       0), [activeBots])
 
   const tabCls = (a: boolean) =>
     `font-semibold text-sm sm:text-base transition-colors ${a ? 'text-white' : 'text-gray-500 hover:text-gray-300'}`
@@ -96,7 +90,6 @@ export function TradesTable() {
   return (
     <div className="bg-[#131825] rounded-xl border border-[#2a3142] overflow-hidden flex flex-col h-full">
 
-      {/* ── Header ── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a3142] shrink-0">
         <div className="flex gap-4 sm:gap-6">
           <button onClick={() => setMainTab('trader')}       className={tabCls(mainTab === 'trader')}>Trader</button>
@@ -114,7 +107,6 @@ export function TradesTable() {
         </div>
       </div>
 
-      {/* ── Sub-tabs ── */}
       {mainTab === 'trader' && (
         <div className="flex items-center gap-2 px-4 py-2 border-b border-[#2a3142]/50 shrink-0">
           <button onClick={() => setTraderTab('bots')} className={subTabCls(traderTab === 'bots')}>
@@ -131,27 +123,23 @@ export function TradesTable() {
         </div>
       )}
 
-      {/* ── Conteúdo ── */}
       <div className="flex-1 overflow-y-auto min-h-0">
 
-        {/* Notificações */}
         {mainTab === 'notificacoes' && (
           <div className="flex flex-col items-center justify-center h-32 text-gray-500">
             <p className="text-sm">Sem notificações</p>
           </div>
         )}
 
-        {/* Tab Bots */}
         {mainTab === 'trader' && traderTab === 'bots' && (
           activeBots.length === 0 && openList.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-40 text-gray-500 gap-2">
               <BotIcon size={22} />
               <p className="text-sm">Nenhum bot activo ainda</p>
-              <p className="text-xs text-gray-600">Cria um bot com o botão + para começar</p>
+              <p className="text-xs text-gray-600">Selecciona um bot e toca em play para começar</p>
             </div>
           ) : (
             <>
-              {/* Contratos abertos (pendentes) */}
               {openList.length > 0 && (
                 <div className="border-b border-[#2a3142]/50">
                   <div className="flex items-center gap-2 px-4 py-2 bg-[#f59e0b]/5">
@@ -161,7 +149,7 @@ export function TradesTable() {
                     </span>
                   </div>
                   {openList.map(t => (
-                    <div key={t.id} className="flex items-center gap-3 px-4 py-2.5 border-b border-[#2a3142]/30 bg-[#f59e0b]/3">
+                    <div key={t.id} className="flex items-center gap-3 px-4 py-2.5 border-b border-[#2a3142]/30">
                       <span className="animate-spin w-3 h-3 border border-[#f59e0b] border-t-transparent rounded-full shrink-0" />
                       <div className="flex-1 min-w-0">
                         <p className="text-white text-xs font-medium truncate">{t.botName}</p>
@@ -177,7 +165,6 @@ export function TradesTable() {
                 </div>
               )}
 
-              {/* Resumo global */}
               {activeBots.length > 0 && (
                 <div className="flex items-center gap-4 px-4 py-2.5 border-b border-[#2a3142]/50 bg-[#1a2235]/50">
                   <div><p className="text-[10px] text-gray-500">Total trades</p><p className="text-white font-bold text-sm">{totalTrades}</p></div>
@@ -202,7 +189,6 @@ export function TradesTable() {
                 </div>
               )}
 
-              {/* Filtro por bot */}
               <div className="flex gap-1.5 px-4 py-2 border-b border-[#2a3142]/30 overflow-x-auto shrink-0">
                 <button onClick={() => setSelectedBotId('all')}
                   className={`shrink-0 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-colors ${selectedBotId === 'all' ? 'bg-[#3b82f6]/20 text-[#3b82f6]' : 'text-gray-500 hover:text-gray-300'}`}>
@@ -217,7 +203,6 @@ export function TradesTable() {
                 ))}
               </div>
 
-              {/* Tabela resumo por bot */}
               <table className="w-full">
                 <thead className="sticky top-0 bg-[#131825] z-10">
                   <tr className="text-gray-400 text-xs border-b border-[#2a3142]">
@@ -272,7 +257,6 @@ export function TradesTable() {
                 </tbody>
               </table>
 
-              {/* Histórico de trades em tempo real */}
               {displayTrades.length > 0 && (
                 <>
                   <div className="flex items-center gap-2 px-4 py-2 border-t border-[#2a3142] bg-[#1a2235]/30 shrink-0">
@@ -308,20 +292,16 @@ export function TradesTable() {
           )
         )}
 
-        {/* Tab Logs */}
         {mainTab === 'trader' && traderTab === 'logs' && (
           <div className="flex flex-col h-full">
-            {/* Selector de bot para logs */}
             <div className="flex gap-1.5 px-4 py-2 border-b border-[#2a3142]/30 overflow-x-auto shrink-0">
-              {bots.map(b => (
+              {sessionBots.map(b => (
                 <button key={b.id} onClick={() => { setLogBotId(b.id); getBotLogs(b.id) }}
                   className={`shrink-0 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-colors ${logBotId === b.id ? 'bg-[#2a3142] text-white' : 'text-gray-500 hover:text-gray-300'}`}>
                   {b.name}
                 </button>
               ))}
             </div>
-
-            {/* Lista de logs */}
             {!logBotId || !botLogs[logBotId] ? (
               <div className="flex flex-col items-center justify-center flex-1 text-gray-500 gap-2">
                 <p className="text-sm">Selecciona um bot para ver os logs</p>
@@ -336,9 +316,7 @@ export function TradesTable() {
                     'text-gray-400'
                   }`}>
                     <span className="text-gray-600 shrink-0">{new Date(log.timestamp).toLocaleTimeString('pt-PT')}</span>
-                    <span className={`shrink-0 font-bold ${
-                      log.level === 'trade' ? 'text-[#3b82f6]' : ''
-                    }`}>[{log.level.toUpperCase()}]</span>
+                    <span className={`shrink-0 font-bold ${log.level === 'trade' ? 'text-[#3b82f6]' : ''}`}>[{log.level.toUpperCase()}]</span>
                     <span className="break-all">{log.message}</span>
                   </div>
                 ))}
