@@ -1,15 +1,24 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter }        from 'next/navigation'
-import { ChartSection }     from '@/components/dashboard/chart-section'
-import { BalanceCard }      from '@/components/dashboard/balance-card'
-import { ControlsSection }  from '@/components/dashboard/controls-section'
-import { TradesTable }      from '@/components/dashboard/trades-table'
-import { Footer }           from '@/components/dashboard/footer'
-import { useAuth }          from '@/lib/auth-context'
-import { useLoader }        from '@/components/loader'
-import { useTrading }       from '@/lib/trading-context'
+import { useRouter }       from 'next/navigation'
+import dynamic             from 'next/dynamic'
+import { ChartSection }    from '@/components/dashboard/chart-section'
+import { BalanceCard }     from '@/components/dashboard/balance-card'
+import { Footer }          from '@/components/dashboard/footer'
+import { useAuth }         from '@/lib/auth-context'
+import { useLoader }       from '@/components/loader'
+import { useTrading }      from '@/lib/trading-context'
+
+// Componentes que dependem de bots-context (WebSocket) — só cliente
+const ControlsSection = dynamic(
+  () => import('@/components/dashboard/controls-section').then(m => ({ default: m.ControlsSection })),
+  { ssr: false }
+)
+const TradesTable = dynamic(
+  () => import('@/components/dashboard/trades-table').then(m => ({ default: m.TradesTable })),
+  { ssr: false }
+)
 
 // ── Loader ────────────────────────────────────────────────────────────────────
 
@@ -109,16 +118,12 @@ export default function TradingDashboard() {
 
       {/* ── Desktop Layout ── */}
       <main className="hidden lg:flex flex-1 min-h-0">
-
-        {/* Coluna esquerda — gráfico + controlos */}
         <div className="flex-1 flex flex-col p-4 xl:p-5 gap-4 overflow-y-auto">
           <ChartSection />
           <BalanceCard />
           <ControlsSection />
           <Footer />
         </div>
-
-        {/* Coluna direita — trades */}
         <div className="w-[380px] xl:w-[450px] 2xl:w-[500px] flex flex-col border-l-2 border-[#1a1f2e]">
           <div className="flex-1 min-h-0 overflow-hidden">
             <TradesTable />
