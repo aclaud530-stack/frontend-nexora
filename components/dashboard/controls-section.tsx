@@ -5,12 +5,12 @@ import { useAuth } from '@/lib/auth-context'
 import { useTrading } from '@/lib/trading-context'
 import { useBots } from '@/lib/bots-context'
 import {
-  BotSummary, BotConfig,
+  BotConfig,
   COMMON_CONFIG_FIELDS, STRATEGY_PARAMS_FIELDS, STRATEGY_LABELS, StrategyFieldDef,
 } from '@/lib/nexora.types'
+import { CatalogBot } from '@/lib/use-nexora-ws'
 import { useLoader } from '@/components/loader'
 
-// ─── Icons ────────────────────────────────────────────────────
 const Ico = {
   Refresh: ({ spin }: { spin?: boolean }) => (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"
@@ -19,11 +19,7 @@ const Ico = {
       <path d="M13.51 5.87a6 6 0 0 0-10.16 2.14" /><path d="M2.49 10.13a6 6 0 0 0 10.16-2.14" />
     </svg>
   ),
-  Play: () => (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M4 2l10 6-10 6V2z" />
-    </svg>
-  ),
+  Play: () => <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2l10 6-10 6V2z" /></svg>,
   Info: () => (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="8" cy="8" r="7" /><line x1="8" y1="11" x2="8" y2="7" /><line x1="8" y1="5" x2="8.01" y2="5" />
@@ -47,7 +43,6 @@ const Ico = {
   ),
 }
 
-// ─── WS dot ───────────────────────────────────────────────────
 function WsDot({ status }: { status: string }) {
   const c = status === 'connected' ? '#22c55e' : status === 'connecting' ? '#f59e0b' : '#ef4444'
   return (
@@ -58,7 +53,6 @@ function WsDot({ status }: { status: string }) {
   )
 }
 
-// ─── Campo genérico ───────────────────────────────────────────
 function Field({ f, value, onChange }: { f: StrategyFieldDef; value: unknown; onChange: (v: unknown) => void }) {
   if (f.type === 'toggle') {
     return (
@@ -83,11 +77,10 @@ function Field({ f, value, onChange }: { f: StrategyFieldDef; value: unknown; on
   )
 }
 
-// ─── Modal de parâmetros ──────────────────────────────────────
 function ConfigModal({ bot, onClose, onConfirm }: {
-  bot: BotSummary
+  bot: CatalogBot
   onClose: () => void
-  onConfirm: (config: BotConfig) => void
+  onConfirm: (config: Partial<BotConfig>) => void
 }) {
   const [cfgVals, setCfgVals] = useState<Record<string, unknown>>(() => {
     const v: Record<string, unknown> = {}
@@ -113,7 +106,7 @@ function ConfigModal({ bot, onClose, onConfirm }: {
   const strategyFields = STRATEGY_PARAMS_FIELDS[bot.strategy] ?? []
 
   const handleConfirm = () => {
-    const config: BotConfig = {
+    onConfirm({
       symbol:         cfgVals.symbol as string,
       contractType:   cfgVals.contractType as string,
       duration:       cfgVals.duration as number,
@@ -124,8 +117,7 @@ function ConfigModal({ bot, onClose, onConfirm }: {
       maxLoss:        cfgVals.maxLoss as number,
       maxProfit:      cfgVals.maxProfit as number,
       strategyParams: prmVals,
-    }
-    onConfirm(config)
+    })
     onClose()
   }
 
@@ -134,20 +126,17 @@ function ConfigModal({ bot, onClose, onConfirm }: {
       <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-40" onClick={onClose} />
       <div className="fixed inset-x-4 top-4 z-50 max-w-lg mx-auto">
         <div className="bg-[#111827] border border-[#1f2a3c] rounded-2xl shadow-2xl overflow-hidden">
-
           <div className="flex items-center justify-between px-5 py-4 border-b border-[#1f2a3c]">
             <div>
               <p className="text-white font-semibold text-sm">{bot.name}</p>
               <p className="text-gray-500 text-xs mt-0.5">{STRATEGY_LABELS[bot.strategy]}</p>
             </div>
-            <button onClick={onClose}
-              className="w-8 h-8 rounded-lg bg-[#1f2a3c] hover:bg-[#2a3650] flex items-center justify-center text-gray-400 hover:text-white transition-colors">
+            <button onClick={onClose} className="w-8 h-8 rounded-lg bg-[#1f2a3c] hover:bg-[#2a3650] flex items-center justify-center text-gray-400 hover:text-white transition-colors">
               <Ico.Close />
             </button>
           </div>
 
           <div className="px-5 py-4 max-h-[65vh] overflow-y-auto space-y-5">
-
             {Object.entries(configGroups).map(([group, fields]) => (
               <div key={group}>
                 <p className="text-gray-500 text-[10px] font-bold uppercase tracking-widest mb-3">{group}</p>
@@ -156,13 +145,9 @@ function ConfigModal({ bot, onClose, onConfirm }: {
                     <div key={f.key}>
                       <div className="flex items-center justify-between mb-1.5">
                         <label className="text-gray-300 text-xs font-medium">{f.label}</label>
-                        {f.type === 'toggle' && (
-                          <Field f={f} value={cfgVals[f.key]} onChange={v => setCfgVals(p => ({ ...p, [f.key]: v }))} />
-                        )}
+                        {f.type === 'toggle' && <Field f={f} value={cfgVals[f.key]} onChange={v => setCfgVals(p => ({ ...p, [f.key]: v }))} />}
                       </div>
-                      {f.type !== 'toggle' && (
-                        <Field f={f} value={cfgVals[f.key]} onChange={v => setCfgVals(p => ({ ...p, [f.key]: v }))} />
-                      )}
+                      {f.type !== 'toggle' && <Field f={f} value={cfgVals[f.key]} onChange={v => setCfgVals(p => ({ ...p, [f.key]: v }))} />}
                       {f.description && <p className="text-gray-600 text-[10px] mt-1">{f.description}</p>}
                     </div>
                   ))}
@@ -181,13 +166,9 @@ function ConfigModal({ bot, onClose, onConfirm }: {
                           <label className="text-gray-300 text-xs font-medium">{f.label}</label>
                           {f.description && <p className="text-gray-600 text-[10px]">{f.description}</p>}
                         </div>
-                        {f.type === 'toggle' && (
-                          <Field f={f} value={prmVals[f.key]} onChange={v => setPrmVals(p => ({ ...p, [f.key]: v }))} />
-                        )}
+                        {f.type === 'toggle' && <Field f={f} value={prmVals[f.key]} onChange={v => setPrmVals(p => ({ ...p, [f.key]: v }))} />}
                       </div>
-                      {f.type !== 'toggle' && (
-                        <Field f={f} value={prmVals[f.key]} onChange={v => setPrmVals(p => ({ ...p, [f.key]: v }))} />
-                      )}
+                      {f.type !== 'toggle' && <Field f={f} value={prmVals[f.key]} onChange={v => setPrmVals(p => ({ ...p, [f.key]: v }))} />}
                     </div>
                   ))}
                 </div>
@@ -196,12 +177,10 @@ function ConfigModal({ bot, onClose, onConfirm }: {
           </div>
 
           <div className="px-5 py-4 border-t border-[#1f2a3c] flex gap-3">
-            <button onClick={onClose}
-              className="px-5 py-2.5 bg-[#1f2a3c] hover:bg-[#2a3650] text-gray-300 rounded-xl text-sm font-medium transition-colors">
+            <button onClick={onClose} className="px-5 py-2.5 bg-[#1f2a3c] hover:bg-[#2a3650] text-gray-300 rounded-xl text-sm font-medium transition-colors">
               Cancelar
             </button>
-            <button onClick={handleConfirm}
-              className="flex-1 bg-[#3b82f6] hover:bg-[#2563eb] text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
+            <button onClick={handleConfirm} className="flex-1 bg-[#3b82f6] hover:bg-[#2563eb] text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
               Confirmar
             </button>
           </div>
@@ -211,35 +190,45 @@ function ConfigModal({ bot, onClose, onConfirm }: {
   )
 }
 
-// ─── ControlsSection ──────────────────────────────────────────
 export function ControlsSection() {
   const { accounts, currentAccount, setCurrentAccount } = useAuth()
   const { botStatus } = useTrading()
   const {
-    catalogBots, sessionBots,
-    wsStatus, isLoadingCatalog, lastError,
-    startBot, stopBot, resumeBot, listCatalog,
+    catalogBots,
+    sessionBots,
+    wsStatus,
+    isLoadingCatalog,
+    lastError,
+    listCatalogBots,
+    startCatalogBot,
+    stopBot,
+    resumeBot,
   } = useBots()
   const loader = useLoader()
 
   const [showAccDrop,   setShowAccDrop]   = useState(false)
   const [showBotDrop,   setShowBotDrop]   = useState(false)
   const [showConfig,    setShowConfig]    = useState(false)
-  const [selectedBot,   setSelectedBot]   = useState<BotSummary | null>(null)
-  const [pendingConfig, setPendingConfig] = useState<BotConfig | null>(null)
+  const [selectedBot,   setSelectedBot]   = useState<CatalogBot | null>(null)
+  const [pendingConfig, setPendingConfig] = useState<Partial<BotConfig> | null>(null)
+  const [sessionBotId,  setSessionBotId]  = useState<string | null>(null)
   const [animProgress,  setAnimProgress]  = useState(0)
 
-  // Seleccionar primeiro bot automaticamente
   useEffect(() => {
     if (!selectedBot && catalogBots.length > 0) setSelectedBot(catalogBots[0])
   }, [catalogBots])
 
-  // Status live (sessão)
-  const liveBot  = selectedBot ? sessionBots.find(b => b.id === selectedBot.id) : null
+  // Detectar bot iniciado na sessão
+  useEffect(() => {
+    if (sessionBotId) return
+    const active = sessionBots.filter(b => b.status === 'running' || b.status === 'paused')
+    if (active.length > 0) setSessionBotId(active[active.length - 1].id)
+  }, [sessionBots, sessionBotId])
+
+  const liveBot   = sessionBotId ? sessionBots.find(b => b.id === sessionBotId) ?? null : null
   const isRunning = liveBot?.status === 'running'
   const isPaused  = liveBot?.status === 'paused'
 
-  // Barra de progresso — apenas os 3 passos reais
   const stepMap: Record<string, number> = { idle: -1, analyzing: 0, contract_open: 1, contract_closed: 2 }
   const activeStep = stepMap[botStatus?.currentStep ?? 'idle'] ?? -1
   const steps = ['Analisando', 'Contrato aberto', 'Contrato fechado']
@@ -255,9 +244,11 @@ export function ControlsSection() {
 
   const handleToggle = () => {
     if (!selectedBot) return
-    if (isRunning)     stopBot(selectedBot.id)
-    else if (isPaused) resumeBot(selectedBot.id)
-    else               startBot(selectedBot.id, pendingConfig ?? undefined)
+    if (isRunning && sessionBotId)     stopBot(sessionBotId)
+    else if (isPaused && sessionBotId) resumeBot(sessionBotId)
+    else {
+      startCatalogBot(selectedBot.id, undefined, pendingConfig ?? undefined)
+    }
   }
 
   const handleAccSelect = async (acc: typeof accounts[number]) => {
@@ -275,15 +266,12 @@ export function ControlsSection() {
   return (
     <>
       <div className="space-y-4">
-
-        {/* Erro */}
         {lastError && (
           <div className="px-3 py-2 rounded-lg bg-[#ef4444]/10 border border-[#ef4444]/20 text-[#ef4444] text-xs">
             ⚠ {lastError}
           </div>
         )}
 
-        {/* Grid 3 colunas */}
         <div className="grid grid-cols-3 gap-3">
 
           {/* Conta */}
@@ -307,13 +295,13 @@ export function ControlsSection() {
             )}
           </div>
 
-          {/* Estratégia — catálogo do backend */}
+          {/* Estratégia */}
           <div className="relative">
             <div className="flex items-center justify-between mb-2">
               <p className="text-gray-400 text-xs font-medium">Estratégia</p>
               <div className="flex items-center gap-2">
                 <WsDot status={wsStatus} />
-                <button onClick={listCatalog} title="Recarregar" className="text-gray-500 hover:text-gray-300 transition-colors">
+                <button onClick={listCatalogBots} title="Recarregar" className="text-gray-500 hover:text-gray-300 transition-colors">
                   <Ico.Refresh spin={isLoadingCatalog} />
                 </button>
               </div>
@@ -323,20 +311,17 @@ export function ControlsSection() {
               {selectedBot ? (
                 <>
                   <span className="text-white font-semibold text-sm truncate">{selectedBot.name}</span>
-                  <span className="text-gray-500 text-[10px] ml-auto shrink-0 hidden sm:block">
-                    {STRATEGY_LABELS[selectedBot.strategy]}
-                  </span>
+                  <span className="text-gray-500 text-[10px] ml-auto shrink-0 hidden sm:block">{STRATEGY_LABELS[selectedBot.strategy]}</span>
                 </>
               ) : (
                 <span className="text-gray-500 text-sm">{isLoadingCatalog ? 'A carregar…' : 'Selecionar'}</span>
               )}
             </button>
-
             {showBotDrop && catalogBots.length > 0 && (
               <div className="absolute top-full left-0 right-0 mt-2 bg-[#111827] rounded-xl shadow-xl border border-[#1f2a3c] py-1 z-50 max-h-56 overflow-y-auto">
                 {catalogBots.map(b => (
                   <button key={b.id}
-                    onClick={() => { setSelectedBot(b); setPendingConfig(null); setShowBotDrop(false) }}
+                    onClick={() => { setSelectedBot(b); setPendingConfig(null); setSessionBotId(null); setShowBotDrop(false) }}
                     className={`w-full px-4 py-2.5 text-left hover:bg-[#1f2a3c] transition-colors ${selectedBot?.id === b.id ? 'bg-[#1f2a3c]' : ''}`}>
                     <p className="text-sm text-white font-medium truncate">{b.name}</p>
                     <p className="text-[10px] text-gray-500 mt-0.5">{STRATEGY_LABELS[b.strategy]}</p>
@@ -355,23 +340,17 @@ export function ControlsSection() {
           </div>
         </div>
 
-        {/* Engrenagem + Play + Progresso */}
+        {/* Engrenagem + Play + Barra */}
         <div className="flex items-center gap-4">
-
-          {/* Engrenagem */}
           <button
             onClick={() => selectedBot && setShowConfig(true)}
             disabled={!selectedBot}
             title="Configurar parâmetros"
             className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
-              ${pendingConfig
-                ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]'
-                : 'border-[#2a3142] bg-[#1e2535] text-gray-400 hover:border-[#3b82f6] hover:text-[#3b82f6] hover:bg-[#242f45]'
-              }`}>
+              ${pendingConfig ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]' : 'border-[#2a3142] bg-[#1e2535] text-gray-400 hover:border-[#3b82f6] hover:text-[#3b82f6] hover:bg-[#242f45]'}`}>
             <Ico.Gear />
           </button>
 
-          {/* Play / Pause */}
           <button
             onClick={handleToggle}
             disabled={!selectedBot || wsStatus !== 'connected'}
@@ -392,23 +371,17 @@ export function ControlsSection() {
             }
           </button>
 
-          {/* Barra — 3 passos do processo */}
           <div className="flex-1 min-w-0">
             <div className="flex justify-between mb-2">
               {steps.map((s, i) => (
-                <span key={s} className={`text-[10px] sm:text-xs font-medium transition-colors ${i <= activeStep ? 'text-white' : 'text-gray-600'}`}>
-                  {s}
-                </span>
+                <span key={s} className={`text-[10px] sm:text-xs font-medium transition-colors ${i <= activeStep ? 'text-white' : 'text-gray-600'}`}>{s}</span>
               ))}
             </div>
             <div className="relative h-1 bg-[#2a3142] rounded-full">
-              <div className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500"
-                style={{ width: `${animProgress}%` }} />
+              <div className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500" style={{ width: `${animProgress}%` }} />
               {steps.map((_, i) => (
                 <div key={i}
-                  className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 transition-all ${
-                    i <= activeStep ? 'bg-white border-[#3b82f6] scale-110' : 'bg-[#1e2535] border-[#3a4255]'
-                  }`}
+                  className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 transition-all ${i <= activeStep ? 'bg-white border-[#3b82f6] scale-110' : 'bg-[#1e2535] border-[#3a4255]'}`}
                   style={{ left: `calc(${(i / (steps.length - 1)) * 100}% - 6px)` }}
                 />
               ))}
@@ -418,11 +391,7 @@ export function ControlsSection() {
       </div>
 
       {showConfig && selectedBot && (
-        <ConfigModal
-          bot={selectedBot}
-          onClose={() => setShowConfig(false)}
-          onConfirm={setPendingConfig}
-        />
+        <ConfigModal bot={selectedBot} onClose={() => setShowConfig(false)} onConfirm={setPendingConfig} />
       )}
     </>
   )
