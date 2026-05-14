@@ -1,473 +1,317 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
-import { useAuth } from '@/lib/auth-context'
-import { useTrading } from '@/lib/trading-context'
-import { useBots } from '@/lib/bots-context'
+// ============================================================
+// NEXORA FOREX — Bots Context
+// Fluxo correcto: Admin gere catálogo → Utilizador escolhe bot
+//                 → configura parâmetros → executa na sessão
+// ============================================================
+
+import { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react'
 import {
-  BotSummary, BotConfig,
-  COMMON_CONFIG_FIELDS, STRATEGY_PARAMS_FIELDS, STRATEGY_LABELS, StrategyFieldDef,
-} from '@/lib/nexora.types'
-import { CatalogBot } from '@/lib/use-nexora-ws'
-import { useLoader } from '@/components/loader'
+  BotSummary, BotState, BotEvent, BotLogEntry,
+  BotStats, BotConfig, BotStrategyType,
+  TradeClosedPayload, TradeOpenedPayload,
+} from './nexora.types'
+import { useNexoraWs, WsStatus, CatalogBot } from './use-nexora-ws'
 
-// ─── Icons ────────────────────────────────────────────────────
-const Ico = {
-  Refresh: ({ spin }: { spin?: boolean }) => (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"
-      strokeLinecap="round" strokeLinejoin="round" className={spin ? 'animate-spin' : ''}>
-      <path d="M1 4v5h5" /><path d="M15 12V7h-5" />
-      <path d="M13.51 5.87a6 6 0 0 0-10.16 2.14" /><path d="M2.49 10.13a6 6 0 0 0 10.16-2.14" />
-    </svg>
-  ),
-  Play: () => (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M4 2l10 6-10 6V2z" />
-    </svg>
-  ),
-  Info: () => (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="8" cy="8" r="7" /><line x1="8" y1="11" x2="8" y2="7" /><line x1="8" y1="5" x2="8.01" y2="5" />
-    </svg>
-  ),
-  Pause: () => (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-      <line x1="8" y1="5" x2="8" y2="19" /><line x1="16" y1="5" x2="16" y2="19" />
-    </svg>
-  ),
-  Gear: () => (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
-  ),
-  Close: () => (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-    </svg>
-  ),
+// ─── TradeRecord para a UI ────────────────────────────────────
+
+export interface TradeRecord {
+  id:         string
+  hora:       string
+  botId:      string
+  botName:    string
+  strategy:   string
+  stake:      number
+  profit:     number
+  won:        boolean
+  timestamp:  number
+  pending?:   boolean
+  direction?: string
 }
 
-// ─── WS dot ───────────────────────────────────────────────────
-function WsDot({ status }: { status: string }) {
-  const c = status === 'connected' ? '#22c55e' : status === 'connecting' ? '#f59e0b' : '#ef4444'
-  return (
-    <span className="w-2 h-2 rounded-full shrink-0 transition-colors"
-      style={{ background: c, boxShadow: status === 'connected' ? `0 0 5px ${c}88` : 'none' }}
-      title={`WebSocket: ${status}`}
-    />
-  )
+// ─── Contexto ─────────────────────────────────────────────────
+
+interface BotsCtx {
+  // Catálogo (bots disponíveis, geridos pelo admin)
+  catalogBots:    CatalogBot[]
+  isLoadingCatalog: boolean
+
+  // Sessão do utilizador (bots em execução)
+  sessionBots:    BotSummary[]
+  botStates:      Record<string, BotState>
+
+  // Estado geral
+  wsStatus:       WsStatus
+  lastError:      string | null
+
+  // Histórico de trades
+  trades:         TradeRecord[]
+  botTrades:      Record<string, TradeRecord[]>
+  openTrades:     Record<string, TradeRecord>
+  botLogs:        Record<string, BotLogEntry[]>
+
+  // Acções — Catálogo (só leitura para utilizadores)
+  listCatalogBots: () => void
+  listSessionBots: () => void
+
+  // Iniciar bot do catálogo (utilizador escolhe e define parâmetros)
+  startCatalogBot: (
+    catalogBotId:   string,
+    sessionName?:   string,
+    configOverride?: Partial<BotConfig>,
+  ) => void
+
+  // Controlo dos bots da sessão
+  stopBot:    (botId: string) => void
+  pauseBot:   (botId: string) => void
+  resumeBot:  (botId: string) => void
+  deleteBot:  (botId: string) => void
+  getBotLogs: (botId: string, limit?: number) => void
+  clearTrades: () => void
+
+  // Admin — gerir catálogo
+  adminAddCatalogBot: (dto: {
+    name: string;
+    description: string;
+    strategy: BotStrategyType;
+    defaultConfig: BotConfig;
+    tags?: string[];
+    isActive?: boolean;
+  }) => void
+  adminRemoveCatalogBot: (id: string) => void
+  adminUpdateCatalogBot: (id: string, updates: Record<string, unknown>) => void
 }
 
-// ─── Campo genérico ───────────────────────────────────────────
-function Field({ f, value, onChange }: { f: StrategyFieldDef; value: unknown; onChange: (v: unknown) => void }) {
-  if (f.type === 'toggle') {
-    return (
-      <button type="button" onClick={() => onChange(!value)}
-        className={`relative w-10 h-5 rounded-full transition-colors ${value ? 'bg-[#3b82f6]' : 'bg-[#2a3142]'}`}>
-        <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${value ? 'translate-x-5' : ''}`} />
-      </button>
-    )
+const Ctx = createContext<BotsCtx | null>(null)
+
+export function useBots() {
+  const c = useContext(Ctx)
+  if (!c) throw new Error('useBots must be used inside BotsProvider')
+  return c
+}
+
+// ─── Provider ─────────────────────────────────────────────────
+
+const MAX_TRADES = 300
+
+export function BotsProvider({ children }: { children: ReactNode }) {
+  // Catálogo (gerido pelo admin, só leitura para o utilizador)
+  const [catalogBots,     setCatalogBots]     = useState<CatalogBot[]>([])
+  const [isLoadingCatalog, setIsLoadingCatalog] = useState(true)
+
+  // Bots da sessão (instâncias em execução do utilizador)
+  const [sessionBots,     setSessionBots]     = useState<BotSummary[]>([])
+  const [botStates,       setBotStates]       = useState<Record<string, BotState>>({})
+
+  // Trades e logs
+  const [trades,          setTrades]          = useState<TradeRecord[]>([])
+  const [botTrades,       setBotTrades]       = useState<Record<string, TradeRecord[]>>({})
+  const [openTrades,      setOpenTrades]      = useState<Record<string, TradeRecord>>({})
+  const [botLogs,         setBotLogs]         = useState<Record<string, BotLogEntry[]>>({})
+
+  const [lastError,       setLastError]       = useState<string | null>(null)
+
+  // Ref síncrona para lookup de nome/strategy por botId
+  const sessionBotsRef = useRef<BotSummary[]>([])
+
+  const getBotMeta = (botId: string) => {
+    const b = sessionBotsRef.current.find(x => x.id === botId)
+    return { name: b?.name ?? botId, strategy: b?.strategy ?? 'unknown' }
   }
-  if (f.type === 'select') {
-    return (
-      <select value={value as string} onChange={e => onChange(e.target.value)}
-        className="w-full bg-[#0f1623] border border-[#2a3142] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#3b82f6] appearance-none cursor-pointer">
-        {f.options?.map(o => <option key={o.value} value={o.value} className="bg-[#0f1623]">{o.label}</option>)}
-      </select>
-    )
-  }
-  return (
-    <input type="number" value={value as number} min={f.min} max={f.max} step={f.step ?? 1}
-      onChange={e => onChange(parseFloat(e.target.value) || 0)}
-      className="w-full bg-[#0f1623] border border-[#2a3142] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#3b82f6]" />
-  )
-}
 
-// ─── Modal de parâmetros ──────────────────────────────────────
-function ConfigModal({ bot, onClose, onConfirm }: {
-  bot: CatalogBot
-  onClose: () => void
-  onConfirm: (config: Partial<BotConfig>) => void
-}) {
-  const strategy = bot.strategy
-
-  const [cfgVals, setCfgVals] = useState<Record<string, unknown>>(() => {
-    const v: Record<string, unknown> = {}
-    COMMON_CONFIG_FIELDS.forEach(f => { v[f.key] = f.defaultValue })
-    return v
-  })
-  const [prmVals, setPrmVals] = useState<Record<string, unknown>>(() => {
-    const v: Record<string, unknown> = {}
-    ;(STRATEGY_PARAMS_FIELDS[strategy] ?? []).forEach(f => { v[f.key] = f.defaultValue })
-    return v
-  })
-
-  const configGroups = useMemo(() => {
-    const g: Record<string, StrategyFieldDef[]> = {}
-    COMMON_CONFIG_FIELDS.forEach(f => {
-      const k = f.group ?? 'Geral'
-      if (!g[k]) g[k] = []
-      g[k].push(f)
+  const patchSessionBot = useCallback((botId: string, patch: Partial<BotSummary>) => {
+    setSessionBots(prev => {
+      const next = prev.map(b => b.id === botId ? { ...b, ...patch } : b)
+      sessionBotsRef.current = next
+      return next
     })
-    return g
   }, [])
 
-  const strategyFields = STRATEGY_PARAMS_FIELDS[strategy] ?? []
+  const showError = useCallback((msg: string) => {
+    setLastError(msg)
+    setTimeout(() => setLastError(null), 6000)
+  }, [])
 
-  const handleConfirm = () => {
-    const config: Partial<BotConfig> = {
-      symbol:         cfgVals.symbol as string,
-      contractType:   cfgVals.contractType as string,
-      duration:       cfgVals.duration as number,
-      durationUnit:   cfgVals.durationUnit as BotConfig['durationUnit'],
-      initialStake:   cfgVals.initialStake as number,
-      currency:       'USD',
-      maxTrades:      cfgVals.maxTrades as number,
-      maxLoss:        cfgVals.maxLoss as number,
-      maxProfit:      cfgVals.maxProfit as number,
-      strategyParams: prmVals,
+  // ── Catálogo carregado ────────────────────────────────────────
+  const handleCatalogLoaded = useCallback((bots: CatalogBot[]) => {
+    setCatalogBots(bots)
+    setIsLoadingCatalog(false)
+  }, [])
+
+  // ── Bots da sessão carregados ─────────────────────────────────
+  const handleSessionBotsLoaded = useCallback((bots: BotSummary[]) => {
+    sessionBotsRef.current = bots
+    setSessionBots(bots)
+  }, [])
+
+  // ── Bot iniciado a partir do catálogo ─────────────────────────
+  const handleBotStarted = useCallback((bot: BotState & { catalogBotId?: string }) => {
+    const summary: BotSummary = {
+      id: bot.id, name: bot.name, strategy: bot.strategy,
+      status: bot.status, stats: bot.stats,
+      startedAt: bot.startedAt, stoppedAt: bot.stoppedAt,
     }
-    onConfirm(config)
-    onClose()
-  }
+    setSessionBots(prev => {
+      const next = [...prev, summary]
+      sessionBotsRef.current = next
+      return next
+    })
+    setBotStates(prev => ({ ...prev, [bot.id]: bot }))
+  }, [])
+
+  // ── Logs recebidos ────────────────────────────────────────────
+  const handleBotLogs = useCallback((botId: string, logs: BotLogEntry[]) => {
+    setBotLogs(prev => ({ ...prev, [botId]: logs }))
+  }, [])
+
+  // ── Eventos do BotManager ─────────────────────────────────────
+  const handleBotEvent = useCallback((ev: BotEvent) => {
+    const { type, botId, payload } = ev
+
+    switch (type) {
+
+      case 'bot:started':
+        patchSessionBot(botId, { status: 'running', startedAt: new Date().toISOString() as any })
+        break
+
+      case 'bot:stopped':
+        patchSessionBot(botId, { status: 'stopped', stoppedAt: new Date().toISOString() as any })
+        setOpenTrades(prev => {
+          const n = { ...prev }
+          Object.keys(n).forEach(k => { if (n[k].botId === botId) delete n[k] })
+          return n
+        })
+        break
+
+      case 'bot:paused':
+        patchSessionBot(botId, { status: 'paused' })
+        break
+
+      case 'bot:resumed':
+        patchSessionBot(botId, { status: 'running' })
+        break
+
+      case 'bot:error': {
+        const msg = (payload as { error?: string }).error ?? 'Erro desconhecido'
+        patchSessionBot(botId, { status: 'error' })
+        setBotStates(p => ({
+          ...p,
+          [botId]: p[botId] ? { ...p[botId], lastError: msg, status: 'error' } : p[botId],
+        }))
+        showError(`Bot: ${msg}`)
+        break
+      }
+
+      case 'bot:stats_updated': {
+        const stats = (payload as { stats?: BotStats }).stats
+        if (!stats) break
+        patchSessionBot(botId, { stats })
+        setBotStates(p => ({
+          ...p,
+          [botId]: p[botId] ? { ...p[botId], stats } : p[botId],
+        }))
+        break
+      }
+
+      case 'bot:trade_opened': {
+        const p = payload as unknown as TradeOpenedPayload
+        if (!p?.contractId) break
+        const { name, strategy } = getBotMeta(botId)
+        const rec: TradeRecord = {
+          id: p.contractId, hora: new Date().toLocaleTimeString('pt-PT'),
+          botId, botName: name, strategy,
+          stake: p.stake, profit: 0, won: false,
+          timestamp: Date.now(), pending: true, direction: p.direction,
+        }
+        setOpenTrades(prev => ({ ...prev, [p.contractId]: rec }))
+        break
+      }
+
+      case 'bot:trade_closed': {
+        const p = payload as unknown as TradeClosedPayload
+        if (!p?.contractId) break
+        const { name, strategy } = getBotMeta(botId)
+        const rec: TradeRecord = {
+          id: p.contractId, hora: new Date().toLocaleTimeString('pt-PT'),
+          botId, botName: name, strategy,
+          stake: p.stake, profit: p.profit, won: p.won,
+          timestamp: Date.now(), pending: false,
+        }
+        setOpenTrades(prev => { const n = { ...prev }; delete n[p.contractId]; return n })
+        setTrades(prev => [rec, ...prev].slice(0, MAX_TRADES))
+        setBotTrades(prev => ({
+          ...prev,
+          [botId]: [rec, ...(prev[botId] ?? [])].slice(0, MAX_TRADES),
+        }))
+        break
+      }
+
+      case 'bot:log': {
+        const entry = (payload as { entry?: BotLogEntry }).entry
+        if (!entry) break
+        setBotLogs(prev => ({
+          ...prev,
+          [botId]: [entry, ...(prev[botId] ?? [])].slice(0, 200),
+        }))
+        break
+      }
+    }
+  }, [patchSessionBot, showError])
+
+  const ws = useNexoraWs({
+    onCatalogLoaded:     handleCatalogLoaded,
+    onSessionBotsLoaded: handleSessionBotsLoaded,
+    onBotStarted:        handleBotStarted,
+    onBotEvent:          handleBotEvent,
+    onBotLogs:           handleBotLogs,
+    onError:             showError,
+  })
+
+  const clearTrades = useCallback(() => {
+    setTrades([])
+    setBotTrades({})
+  }, [])
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-40" onClick={onClose} />
-      <div className="fixed inset-x-4 top-4 z-50 max-w-lg mx-auto">
-        <div className="bg-[#111827] border border-[#1f2a3c] rounded-2xl shadow-2xl overflow-hidden">
+    <Ctx.Provider value={{
+      // Catálogo
+      catalogBots,
+      isLoadingCatalog,
 
-          <div className="flex items-center justify-between px-5 py-4 border-b border-[#1f2a3c]">
-            <div>
-              <p className="text-white font-semibold text-sm">{bot.name}</p>
-              <p className="text-gray-500 text-xs mt-0.5">{STRATEGY_LABELS[strategy]}</p>
-            </div>
-            <button onClick={onClose}
-              className="w-8 h-8 rounded-lg bg-[#1f2a3c] hover:bg-[#2a3650] flex items-center justify-center text-gray-400 hover:text-white transition-colors">
-              <Ico.Close />
-            </button>
-          </div>
+      // Sessão
+      sessionBots,
+      botStates,
 
-          <div className="px-5 py-4 max-h-[65vh] overflow-y-auto space-y-5">
+      // Estado
+      wsStatus: ws.wsStatus,
+      lastError,
 
-            {Object.entries(configGroups).map(([group, fields]) => (
-              <div key={group}>
-                <p className="text-gray-500 text-[10px] font-bold uppercase tracking-widest mb-3">{group}</p>
-                <div className="space-y-3">
-                  {fields.map(f => (
-                    <div key={f.key}>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-gray-300 text-xs font-medium">{f.label}</label>
-                        {f.type === 'toggle' && (
-                          <Field f={f} value={cfgVals[f.key]} onChange={v => setCfgVals(p => ({ ...p, [f.key]: v }))} />
-                        )}
-                      </div>
-                      {f.type !== 'toggle' && (
-                        <Field f={f} value={cfgVals[f.key]} onChange={v => setCfgVals(p => ({ ...p, [f.key]: v }))} />
-                      )}
-                      {f.description && <p className="text-gray-600 text-[10px] mt-1">{f.description}</p>}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+      // Trades / logs
+      trades,
+      botTrades,
+      openTrades,
+      botLogs,
 
-            {strategyFields.length > 0 && (
-              <div>
-                <p className="text-gray-500 text-[10px] font-bold uppercase tracking-widest mb-3">Parâmetros da Estratégia</p>
-                <div className="space-y-3">
-                  {strategyFields.map(f => (
-                    <div key={f.key}>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div>
-                          <label className="text-gray-300 text-xs font-medium">{f.label}</label>
-                          {f.description && <p className="text-gray-600 text-[10px]">{f.description}</p>}
-                        </div>
-                        {f.type === 'toggle' && (
-                          <Field f={f} value={prmVals[f.key]} onChange={v => setPrmVals(p => ({ ...p, [f.key]: v }))} />
-                        )}
-                      </div>
-                      {f.type !== 'toggle' && (
-                        <Field f={f} value={prmVals[f.key]} onChange={v => setPrmVals(p => ({ ...p, [f.key]: v }))} />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+      // Acções — catálogo
+      listCatalogBots: ws.listCatalogBots,
+      listSessionBots: ws.listSessionBots,
+      startCatalogBot: ws.startCatalogBot,
 
-          <div className="px-5 py-4 border-t border-[#1f2a3c] flex gap-3">
-            <button onClick={onClose}
-              className="px-5 py-2.5 bg-[#1f2a3c] hover:bg-[#2a3650] text-gray-300 rounded-xl text-sm font-medium transition-colors">
-              Cancelar
-            </button>
-            <button onClick={handleConfirm}
-              className="flex-1 bg-[#3b82f6] hover:bg-[#2563eb] text-white rounded-xl py-2.5 text-sm font-semibold transition-colors">
-              Confirmar
-            </button>
-          </div>
-        </div>
-      </div>
-    </>
-  )
-}
+      // Acções — controlo de sessão
+      stopBot:    ws.stopBot,
+      pauseBot:   ws.pauseBot,
+      resumeBot:  ws.resumeBot,
+      deleteBot:  ws.deleteBot,
+      getBotLogs: ws.getBotLogs,
+      clearTrades,
 
-// ─── ControlsSection ──────────────────────────────────────────
-export function ControlsSection() {
-  const { accounts, currentAccount, setCurrentAccount } = useAuth()
-  const { botStatus } = useTrading()
-  const {
-    catalogBots,
-    sessionBots,
-    wsStatus,
-    isLoadingCatalog,
-    lastError,
-    listCatalogBots,
-    startCatalogBot,
-    stopBot,
-    pauseBot,
-    resumeBot,
-    openTrades,
-  } = useBots()
-  const loader = useLoader()
-
-  const [showAccDrop,   setShowAccDrop]   = useState(false)
-  const [showBotDrop,   setShowBotDrop]   = useState(false)
-  const [showConfig,    setShowConfig]    = useState(false)
-  const [selectedBot,   setSelectedBot]   = useState<CatalogBot | null>(null)
-  // config guardada após fechar o modal
-  const [pendingConfig, setPendingConfig] = useState<Partial<BotConfig> | null>(null)
-  // sessionBotId do bot iniciado — para controlo de play/pause/stop
-  const [sessionBotId,  setSessionBotId]  = useState<string | null>(null)
-  const [animProgress,  setAnimProgress]  = useState(0)
-
-  // Seleccionar primeiro bot do catálogo automaticamente
-  useEffect(() => {
-    if (!selectedBot && catalogBots.length > 0) setSelectedBot(catalogBots[0])
-  }, [catalogBots])
-
-  // Bot live na sessão (para status do play/pause)
-  const liveBot = sessionBotId
-    ? sessionBots.find(b => b.id === sessionBotId) ?? null
-    : null
-
-  const isRunning = liveBot?.status === 'running'
-  const isPaused  = liveBot?.status === 'paused'
-
-  // Barra de progresso — apenas os 3 passos reais
-  const stepMap: Record<string, number> = { idle: -1, analyzing: 0, contract_open: 1, contract_closed: 2 }
-  const activeStep = stepMap[botStatus?.currentStep ?? 'idle'] ?? -1
-  const steps = ['Analisando', 'Contrato aberto', 'Contrato fechado']
-
-  useEffect(() => {
-    const target = isRunning && activeStep >= 0 ? ((activeStep + 1) / steps.length) * 100 : 0
-    const id = setInterval(() => setAnimProgress(p => {
-      const d = target - p
-      return Math.abs(d) < 0.5 ? target : p + d * 0.1
-    }), 16)
-    return () => clearInterval(id)
-  }, [isRunning, activeStep])
-
-  const handleToggle = () => {
-    if (!selectedBot) return
-    if (isRunning && sessionBotId) {
-      stopBot(sessionBotId)
-    } else if (isPaused && sessionBotId) {
-      resumeBot(sessionBotId)
-    } else {
-      // Iniciar novo bot do catálogo com config opcional
-      startCatalogBot(selectedBot.id, undefined, pendingConfig ?? undefined)
-      // O sessionBotId será atribuído via onBotStarted no contexto;
-      // como não temos callback directo aqui, encontramos pelo último iniciado
-      // após o evento chegar ao sessionBots
-    }
-  }
-
-  // Detectar novo bot iniciado (último a entrar em sessionBots com status running)
-  useEffect(() => {
-    if (!selectedBot) return
-    // Procurar bot da sessão que corresponda ao bot do catálogo seleccionado
-    // O backend devolve o catalogBotId ou podemos usar o último adicionado
-    const running = sessionBots.filter(b => b.status === 'running' || b.status === 'paused')
-    if (running.length > 0 && !sessionBotId) {
-      // Usar o mais recente (último da lista)
-      setSessionBotId(running[running.length - 1].id)
-    }
-  }, [sessionBots])
-
-  const handleAccSelect = async (acc: typeof accounts[number]) => {
-    setShowAccDrop(false)
-    if (currentAccount?.account_id === acc.account_id) return
-    const label = acc.is_virtual ? 'Conta Demo' : 'Conta Real'
-    loader.show(`A ligar a ${label}…`)
-    try { await setCurrentAccount(acc); loader.complete(`${label} activa!`) }
-    catch { loader.hide() }
-  }
-
-  const accLabel = !currentAccount ? 'Selecionar' : currentAccount.is_virtual ? 'Demo' : 'Real'
-  const accColor = !currentAccount ? '#6b7280' : currentAccount.is_virtual ? '#2ec7ff' : '#22c55e'
-
-  return (
-    <>
-      <div className="space-y-4">
-
-        {/* Erro */}
-        {lastError && (
-          <div className="px-3 py-2 rounded-lg bg-[#ef4444]/10 border border-[#ef4444]/20 text-[#ef4444] text-xs">
-            ⚠ {lastError}
-          </div>
-        )}
-
-        {/* Grid 3 colunas */}
-        <div className="grid grid-cols-3 gap-3">
-
-          {/* Conta */}
-          <div className="relative">
-            <p className="text-gray-400 text-xs mb-2 font-medium">Tipo de Conta</p>
-            <button onClick={() => setShowAccDrop(!showAccDrop)}
-              className="w-full bg-[#1e2535] hover:bg-[#242f45] rounded-xl px-3 py-3 flex items-center justify-center gap-2 border border-[#2a3142] transition-all">
-              <span className="text-sm font-semibold" style={{ color: accColor }}>{accLabel}</span>
-              <Ico.Refresh />
-            </button>
-            {showAccDrop && (
-              <div className="absolute top-full left-0 right-0 mt-2 bg-[#111827] rounded-xl shadow-xl border border-[#1f2a3c] py-1 z-50">
-                {accounts.map(a => (
-                  <button key={a.account_id} onClick={() => handleAccSelect(a)}
-                    className={`w-full px-4 py-2.5 text-left text-sm hover:bg-[#1f2a3c] transition-colors ${currentAccount?.account_id === a.account_id ? 'text-[#22c55e]' : 'text-white'}`}>
-                    {a.is_virtual ? 'Conta Demo' : 'Conta Real'}
-                    <span className="text-gray-500 text-xs"> — ${Number(a.balance ?? 0).toFixed(2)}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Estratégia — catálogo do backend */}
-          <div className="relative">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-gray-400 text-xs font-medium">Estratégia</p>
-              <div className="flex items-center gap-2">
-                <WsDot status={wsStatus} />
-                <button onClick={listCatalogBots} title="Recarregar catálogo"
-                  className="text-gray-500 hover:text-gray-300 transition-colors">
-                  <Ico.Refresh spin={isLoadingCatalog} />
-                </button>
-              </div>
-            </div>
-            <button onClick={() => setShowBotDrop(!showBotDrop)}
-              className="w-full bg-[#1e2535] hover:bg-[#242f45] rounded-xl px-3 py-3 flex items-center gap-2 border border-[#2a3142] transition-all min-w-0">
-              {selectedBot ? (
-                <>
-                  <span className="text-white font-semibold text-sm truncate">{selectedBot.name}</span>
-                  <span className="text-gray-500 text-[10px] ml-auto shrink-0 hidden sm:block">
-                    {STRATEGY_LABELS[selectedBot.strategy]}
-                  </span>
-                </>
-              ) : (
-                <span className="text-gray-500 text-sm">{isLoadingCatalog ? 'A carregar…' : 'Selecionar'}</span>
-              )}
-            </button>
-
-            {showBotDrop && catalogBots.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-2 bg-[#111827] rounded-xl shadow-xl border border-[#1f2a3c] py-1 z-50 max-h-56 overflow-y-auto">
-                {catalogBots.map(b => (
-                  <button key={b.id}
-                    onClick={() => {
-                      setSelectedBot(b)
-                      setPendingConfig(null)
-                      setSessionBotId(null)
-                      setShowBotDrop(false)
-                    }}
-                    className={`w-full px-4 py-2.5 text-left hover:bg-[#1f2a3c] transition-colors ${selectedBot?.id === b.id ? 'bg-[#1f2a3c]' : ''}`}>
-                    <p className="text-sm text-white font-medium truncate">{b.name}</p>
-                    <p className="text-[10px] text-gray-500 mt-0.5">{STRATEGY_LABELS[b.strategy]}</p>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Vídeo Aula */}
-          <div>
-            <p className="text-gray-400 text-xs mb-2 font-medium">Vídeo Aula</p>
-            <button className="w-full bg-[#dc2626] hover:bg-[#b91c1c] rounded-xl px-3 py-3 flex items-center justify-center gap-2 transition-all">
-              <Ico.Play /><Ico.Info />
-            </button>
-          </div>
-        </div>
-
-        {/* Engrenagem + Play + Progresso */}
-        <div className="flex items-center gap-4">
-
-          {/* Engrenagem — configura parâmetros */}
-          <button
-            onClick={() => selectedBot && setShowConfig(true)}
-            disabled={!selectedBot}
-            title="Configurar parâmetros"
-            className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
-              ${pendingConfig
-                ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]'
-                : 'border-[#2a3142] bg-[#1e2535] text-gray-400 hover:border-[#3b82f6] hover:text-[#3b82f6] hover:bg-[#242f45]'
-              }`}>
-            <Ico.Gear />
-          </button>
-
-          {/* Play / Pause / Stop */}
-          <button
-            onClick={handleToggle}
-            disabled={!selectedBot || wsStatus !== 'connected'}
-            className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all shrink-0 ${
-              !selectedBot || wsStatus !== 'connected'
-                ? 'opacity-40 cursor-not-allowed border-gray-700 bg-transparent'
-                : isRunning
-                  ? 'border-[#dc2626] bg-transparent hover:bg-[#dc2626]/10'
-                  : isPaused
-                    ? 'border-[#f59e0b] bg-[#f59e0b]/10 hover:bg-[#f59e0b]/20'
-                    : 'border-[#22c55e] bg-[#22c55e]/10 hover:bg-[#22c55e]/20'
-            }`}>
-            {isRunning
-              ? <span className="text-[#dc2626]"><Ico.Pause /></span>
-              : isPaused
-                ? <svg width="18" height="18" viewBox="0 0 24 24" fill="#f59e0b"><path d="M6 4l14 8-14 8V4z" /></svg>
-                : <svg width="18" height="18" viewBox="0 0 24 24" fill="#22c55e"><path d="M6 4l14 8-14 8V4z" /></svg>
-            }
-          </button>
-
-          {/* Barra — 3 passos do processo */}
-          <div className="flex-1 min-w-0">
-            <div className="flex justify-between mb-2">
-              {steps.map((s, i) => (
-                <span key={s} className={`text-[10px] sm:text-xs font-medium transition-colors ${i <= activeStep ? 'text-white' : 'text-gray-600'}`}>
-                  {s}
-                </span>
-              ))}
-            </div>
-            <div className="relative h-1 bg-[#2a3142] rounded-full">
-              <div className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500"
-                style={{ width: `${animProgress}%` }} />
-              {steps.map((_, i) => (
-                <div key={i}
-                  className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 transition-all ${
-                    i <= activeStep ? 'bg-white border-[#3b82f6] scale-110' : 'bg-[#1e2535] border-[#3a4255]'
-                  }`}
-                  style={{ left: `calc(${(i / (steps.length - 1)) * 100}% - 6px)` }}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Modal de parâmetros */}
-      {showConfig && selectedBot && (
-        <ConfigModal
-          bot={selectedBot}
-          onClose={() => setShowConfig(false)}
-          onConfirm={setPendingConfig}
-        />
-      )}
-    </>
+      // Admin
+      adminAddCatalogBot:    ws.adminAddCatalogBot,
+      adminRemoveCatalogBot: ws.adminRemoveCatalogBot,
+      adminUpdateCatalogBot: ws.adminUpdateCatalogBot,
+    }}>
+      {children}
+    </Ctx.Provider>
   )
 }
