@@ -44,7 +44,7 @@ interface NexoraWsCallbacks {
 }
 
 export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
-  const wsUrl      = process.env.NEXT_PUBLIC_WS_URL ?? 'wss://banckend-production-14a1.up.railway.app'
+  const wsUrl      = process.env.NEXT_PUBLIC_WS_URL ?? 'wss://wss://banckend-nexora-production.up.railway.app'
   const wsRef      = useRef<WebSocket | null>(null)
   const pingRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const reconnRef  = useRef<ReturnType<typeof setTimeout> | null>(null)
