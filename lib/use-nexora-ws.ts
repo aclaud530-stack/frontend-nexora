@@ -44,7 +44,7 @@ interface NexoraWsCallbacks {
 }
 
 export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
-  const wsUrl      = process.env.NEXT_PUBLIC_WS_URL ?? 'wss://wss://banckend-nexora-production.up.railway.app'
+  const wsUrl      = process.env.NEXT_PUBLIC_WS_URL ?? 'wss://banckend-nexora-production.up.railway.app'
   const wsRef      = useRef<WebSocket | null>(null)
   const pingRef    = useRef<ReturnType<typeof setInterval> | null>(null)
   const reconnRef  = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -138,6 +138,16 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
             break
           }
 
+          // ── Confirmação de autenticação ───────────────────
+          // Sempre que a sessão fica autenticada, pedimos o catálogo
+          // outra vez como rede de segurança — cobre o caso em que o
+          // list_bots inicial (enviado no onopen, antes do auth) tenha
+          // chegado a uma instância/sessão ainda não autenticada.
+          if (msg.type === 'authenticated') {
+            send('list_bots')
+            break
+          }
+
           console.debug('[NexoraWS] mensagem não tratada:', msg.type, payload)
       }
     } catch (e) {
@@ -158,7 +168,9 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
       if (!mountedRef.current) { ws.close(); return }
       attemptRef.current = 0
       setWsStatus('connected')
-      // Pede catálogo de bots imediatamente após ligar
+      // Pede catálogo de bots imediatamente após ligar.
+      // list_bots é público no backend (não exige autenticação),
+      // por isso pode ser pedido logo aqui em segurança.
       ws.send(JSON.stringify({ type: 'list_bots', payload: {} }))
       // Keepalive 25s
       pingRef.current = setInterval(() => {
