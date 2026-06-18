@@ -204,7 +204,7 @@ export function ControlsSection() {
   const {
     catalogBots,
     sessionBots,
-    botStates,
+    openTrades,
     wsStatus,
     isLoadingCatalog,
     lastError,
@@ -220,46 +220,86 @@ export function ControlsSection() {
   const [showConfig,    setShowConfig]    = useState(false)
   const [selectedBot,   setSelectedBot]   = useState<CatalogBot | null>(null)
   const [pendingConfig, setPendingConfig] = useState<Partial<BotConfig> | null>(null)
+  const [animProgress,  setAnimProgress]  = useState(0)
 
   // sessionBotId: ID do bot activo nesta sessão
-  // Actualizado imediatamente ao iniciar (não depende só do useEffect)
+  // Guardado em ref para ser acessível de forma síncrona dentro de handleToggle
   const [sessionBotId, setSessionBotId] = useState<string | null>(null)
-
-  const [animProgress, setAnimProgress] = useState(0)
 
   // Pré-seleccionar primeiro bot do catálogo
   useEffect(() => {
     if (!selectedBot && catalogBots.length > 0) setSelectedBot(catalogBots[0])
   }, [catalogBots, selectedBot])
 
-  // Sincronizar sessionBotId com bots activos da sessão
-  // (cobre o caso de recarregar a página com bot já em curso)
+  // Sincronizar sessionBotId com o bot activo da sessão
+  // Cobre o caso de recarregar página com bot já em curso
   useEffect(() => {
-    if (sessionBotId) return
-    const active = sessionBots.filter(b => b.status === 'running' || b.status === 'paused')
-    if (active.length > 0) setSessionBotId(active[active.length - 1].id)
+    const running = sessionBots.find(b => b.status === 'running' || b.status === 'paused')
+    if (running && !sessionBotId) {
+      setSessionBotId(running.id)
+    }
+    // Se o bot que rastreamos parou ou teve erro, limpar
+    if (sessionBotId) {
+      const tracked = sessionBots.find(b => b.id === sessionBotId)
+      if (tracked && (tracked.status === 'stopped' || tracked.status === 'error')) {
+        setSessionBotId(null)
+      }
+    }
   }, [sessionBots, sessionBotId])
 
-  // Bot activo em tempo real
+  // Bot activo em tempo real — lido directamente de sessionBots para
+  // garantir que reflecte o estado mais recente sem depender de sessionBotId
   const liveBot   = sessionBotId ? sessionBots.find(b => b.id === sessionBotId) ?? null : null
   const isRunning = liveBot?.status === 'running'
   const isPaused  = liveBot?.status === 'paused'
 
-  // Barra de progresso: lê o currentStep do BotState (bots-context),
-  // não do trading-context que é o bot antigo/independente
-  const liveState   = sessionBotId ? botStates[sessionBotId] ?? null : null
-  const currentStep = liveState?.currentStep ?? (isRunning ? 'analyzing' : 'idle')
+  // ── Barra de progresso ────────────────────────────────────────────────────
+  // Derivada dos eventos de trade (openTrades) que chegam em tempo real:
+  //   idle            → sem bot a correr
+  //   analyzing (0)   → bot running mas sem contrato aberto
+  //   contract_open (1) → existe contrato aberto para este bot
+  //   contract_closed (2) → contrato fechou (flash breve antes de voltar a analyzing)
+  const [progressStep, setProgressStep] = useState(-1)
 
-  const stepMap: Record<string, number> = {
-    idle: -1, analyzing: 0, contract_open: 1, contract_closed: 2,
-  }
-  const activeStep = stepMap[currentStep] ?? -1
+  useEffect(() => {
+    if (!isRunning) {
+      setProgressStep(-1)
+      return
+    }
+    // Verificar se há contrato aberto para este bot
+    const hasOpen = sessionBotId
+      ? Object.values(openTrades).some(t => t.botId === sessionBotId)
+      : false
+
+    if (hasOpen) {
+      setProgressStep(1) // contract_open
+    } else {
+      setProgressStep(0) // analyzing
+    }
+  }, [isRunning, openTrades, sessionBotId])
+
+  // Flash "contract_closed" quando um trade fecha
+  // Detectado pela diminuição de openTrades para este bot
+  const prevOpenCountRef = useState<number>(0)
+  useEffect(() => {
+    if (!isRunning || !sessionBotId) return
+    const count = Object.values(openTrades).filter(t => t.botId === sessionBotId).length
+    const prev  = prevOpenCountRef[0]
+    if (prev > 0 && count === 0) {
+      // Contrato acabou de fechar — mostrar step 2 brevemente
+      setProgressStep(2)
+      const timer = setTimeout(() => setProgressStep(0), 1200)
+      prevOpenCountRef[1](count)
+      return () => clearTimeout(timer)
+    }
+    prevOpenCountRef[1](count)
+  }, [openTrades, isRunning, sessionBotId]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const steps = ['Analisando', 'Contrato aberto', 'Contrato fechado']
 
-  // Animar barra de progresso
   useEffect(() => {
-    const target = isRunning && activeStep >= 0
-      ? ((activeStep + 1) / steps.length) * 100
+    const target = isRunning && progressStep >= 0
+      ? ((progressStep + 1) / steps.length) * 100
       : 0
     const id = setInterval(() => {
       setAnimProgress(p => {
@@ -268,37 +308,24 @@ export function ControlsSection() {
       })
     }, 16)
     return () => clearInterval(id)
-  }, [isRunning, activeStep, steps.length])
+  }, [isRunning, progressStep, steps.length])
 
+  // ── Botão Play/Stop ───────────────────────────────────────────────────────
   const handleToggle = () => {
     if (!selectedBot) return
 
     if (isRunning && sessionBotId) {
-      // Para o bot imediatamente
       stopBot(sessionBotId)
       return
     }
-
     if (isPaused && sessionBotId) {
       resumeBot(sessionBotId)
       return
     }
-
-    // Iniciar novo bot — gera um ID optimista para o botão responder imediatamente
-    // O ID real chegará via handleBotStarted, mas o sessionBotId será actualizado
-    // pelo useEffect de sincronização quando o bot aparecer em sessionBots
+    // Iniciar — o sessionBotId será preenchido pelo useEffect acima
+    // quando o backend confirmar bot:started
     startCatalogBot(selectedBot.id, undefined, pendingConfig ?? undefined)
   }
-
-  // Quando o bot for parado/terminado, limpar o sessionBotId
-  // para o botão voltar ao estado "play"
-  useEffect(() => {
-    if (!sessionBotId) return
-    const bot = sessionBots.find(b => b.id === sessionBotId)
-    if (bot && (bot.status === 'stopped' || bot.status === 'error')) {
-      setSessionBotId(null)
-    }
-  }, [sessionBots, sessionBotId])
 
   const handleAccSelect = async (acc: typeof accounts[number]) => {
     setShowAccDrop(false)
@@ -370,12 +397,7 @@ export function ControlsSection() {
               <div className="absolute top-full left-0 right-0 mt-2 bg-[#111827] rounded-xl shadow-xl border border-[#1f2a3c] py-1 z-50 max-h-56 overflow-y-auto">
                 {catalogBots.map(b => (
                   <button key={b.id}
-                    onClick={() => {
-                      setSelectedBot(b)
-                      setPendingConfig(null)
-                      setSessionBotId(null)
-                      setShowBotDrop(false)
-                    }}
+                    onClick={() => { setSelectedBot(b); setPendingConfig(null); setSessionBotId(null); setShowBotDrop(false) }}
                     className={`w-full px-4 py-2.5 text-left hover:bg-[#1f2a3c] transition-colors ${selectedBot?.id === b.id ? 'bg-[#1f2a3c]' : ''}`}>
                     <p className="text-sm text-white font-medium truncate">{b.name}</p>
                     <p className="text-[10px] text-gray-500 mt-0.5">{STRATEGY_LABELS[b.strategy]}</p>
@@ -401,9 +423,7 @@ export function ControlsSection() {
             disabled={!selectedBot}
             title="Configurar parâmetros"
             className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
-              ${pendingConfig
-                ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]'
-                : 'border-[#2a3142] bg-[#1e2535] text-gray-400 hover:border-[#3b82f6] hover:text-[#3b82f6] hover:bg-[#242f45]'}`}>
+              ${pendingConfig ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]' : 'border-[#2a3142] bg-[#1e2535] text-gray-400 hover:border-[#3b82f6] hover:text-[#3b82f6] hover:bg-[#242f45]'}`}>
             <Ico.Gear />
           </button>
 
@@ -430,24 +450,14 @@ export function ControlsSection() {
           <div className="flex-1 min-w-0">
             <div className="flex justify-between mb-2">
               {steps.map((s, i) => (
-                <span key={s}
-                  className={`text-[10px] sm:text-xs font-medium transition-colors ${i <= activeStep ? 'text-white' : 'text-gray-600'}`}>
-                  {s}
-                </span>
+                <span key={s} className={`text-[10px] sm:text-xs font-medium transition-colors ${i <= progressStep ? 'text-white' : 'text-gray-600'}`}>{s}</span>
               ))}
             </div>
             <div className="relative h-1 bg-[#2a3142] rounded-full">
-              <div
-                className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500"
-                style={{ width: `${animProgress}%` }}
-              />
+              <div className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500" style={{ width: `${animProgress}%` }} />
               {steps.map((_, i) => (
                 <div key={i}
-                  className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 transition-all ${
-                    i <= activeStep
-                      ? 'bg-white border-[#3b82f6] scale-110'
-                      : 'bg-[#1e2535] border-[#3a4255]'
-                  }`}
+                  className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 transition-all ${i <= progressStep ? 'bg-white border-[#3b82f6] scale-110' : 'bg-[#1e2535] border-[#3a4255]'}`}
                   style={{ left: `calc(${(i / (steps.length - 1)) * 100}% - 6px)` }}
                 />
               ))}
@@ -457,11 +467,7 @@ export function ControlsSection() {
       </div>
 
       {showConfig && selectedBot && (
-        <ConfigModal
-          bot={selectedBot}
-          onClose={() => setShowConfig(false)}
-          onConfirm={setPendingConfig}
-        />
+        <ConfigModal bot={selectedBot} onClose={() => setShowConfig(false)} onConfirm={setPendingConfig} />
       )}
     </>
   )
