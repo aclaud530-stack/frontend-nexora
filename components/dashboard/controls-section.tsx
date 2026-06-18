@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useAuth } from '@/lib/auth-context'
 import { useBots } from '@/lib/bots-context'
 import {
@@ -204,6 +204,7 @@ export function ControlsSection() {
   const {
     catalogBots,
     sessionBots,
+    trades,
     openTrades,
     wsStatus,
     isLoadingCatalog,
@@ -221,10 +222,21 @@ export function ControlsSection() {
   const [selectedBot,   setSelectedBot]   = useState<CatalogBot | null>(null)
   const [pendingConfig, setPendingConfig] = useState<Partial<BotConfig> | null>(null)
   const [animProgress,  setAnimProgress]  = useState(0)
+  const [progressStep,  setProgressStep]  = useState(-1)
 
-  // sessionBotId: ID do bot activo nesta sessão
-  // Guardado em ref para ser acessível de forma síncrona dentro de handleToggle
+  // ── FIX 1: sessionBotId guardado TAMBÉM em ref para leitura síncrona
+  // O estado React actualiza assincronamente — a ref garante que handleToggle
+  // vê sempre o valor mais recente sem esperar pelo próximo render.
   const [sessionBotId, setSessionBotId] = useState<string | null>(null)
+  const sessionBotIdRef = useRef<string | null>(null)
+  const setSessionBotIdSync = (id: string | null) => {
+    sessionBotIdRef.current = id
+    setSessionBotId(id)
+  }
+
+  // ── FIX 2: prevOpenCount como useRef (não useState)
+  // useState dentro de useEffect causava re-renders infinitos e leituras stale.
+  const prevOpenCountRef = useRef<number>(0)
 
   // Pré-seleccionar primeiro bot do catálogo
   useEffect(() => {
@@ -232,71 +244,58 @@ export function ControlsSection() {
   }, [catalogBots, selectedBot])
 
   // Sincronizar sessionBotId com o bot activo da sessão
-  // Cobre o caso de recarregar página com bot já em curso
   useEffect(() => {
     const running = sessionBots.find(b => b.status === 'running' || b.status === 'paused')
-    if (running && !sessionBotId) {
-      setSessionBotId(running.id)
+    if (running && !sessionBotIdRef.current) {
+      setSessionBotIdSync(running.id)
     }
-    // Se o bot que rastreamos parou ou teve erro, limpar
-    if (sessionBotId) {
-      const tracked = sessionBots.find(b => b.id === sessionBotId)
+    if (sessionBotIdRef.current) {
+      const tracked = sessionBots.find(b => b.id === sessionBotIdRef.current)
       if (tracked && (tracked.status === 'stopped' || tracked.status === 'error')) {
-        setSessionBotId(null)
+        setSessionBotIdSync(null)
       }
     }
-  }, [sessionBots, sessionBotId])
+  }, [sessionBots])
 
-  // Bot activo em tempo real — lido directamente de sessionBots para
-  // garantir que reflecte o estado mais recente sem depender de sessionBotId
+  // Bot activo lido de sessionBots (fonte de verdade)
   const liveBot   = sessionBotId ? sessionBots.find(b => b.id === sessionBotId) ?? null : null
   const isRunning = liveBot?.status === 'running'
   const isPaused  = liveBot?.status === 'paused'
 
-  // ── Barra de progresso ────────────────────────────────────────────────────
-  // Derivada dos eventos de trade (openTrades) que chegam em tempo real:
-  //   idle            → sem bot a correr
-  //   analyzing (0)   → bot running mas sem contrato aberto
-  //   contract_open (1) → existe contrato aberto para este bot
-  //   contract_closed (2) → contrato fechou (flash breve antes de voltar a analyzing)
-  const [progressStep, setProgressStep] = useState(-1)
-
+  // ── Barra de progresso derivada de openTrades ─────────────────────────────
+  // Passo 0 → analyzing (bot running, sem contrato aberto)
+  // Passo 1 → contract_open (contrato aberto para este bot)
+  // Passo 2 → contract_closed (flash de 1.2s quando contrato fecha)
   useEffect(() => {
     if (!isRunning) {
       setProgressStep(-1)
+      prevOpenCountRef.current = 0
       return
     }
-    // Verificar se há contrato aberto para este bot
-    const hasOpen = sessionBotId
-      ? Object.values(openTrades).some(t => t.botId === sessionBotId)
-      : false
 
-    if (hasOpen) {
-      setProgressStep(1) // contract_open
+    const count = sessionBotId
+      ? Object.values(openTrades).filter(t => t.botId === sessionBotId).length
+      : 0
+    const prev = prevOpenCountRef.current
+    prevOpenCountRef.current = count
+
+    if (count > 0) {
+      // Há contrato aberto
+      setProgressStep(1)
+    } else if (prev > 0 && count === 0) {
+      // Contrato acabou de fechar — flash breve no passo 2
+      setProgressStep(2)
+      const timer = setTimeout(() => setProgressStep(0), 1200)
+      return () => clearTimeout(timer)
     } else {
-      setProgressStep(0) // analyzing
+      // Sem contrato — a analisar
+      setProgressStep(0)
     }
   }, [isRunning, openTrades, sessionBotId])
 
-  // Flash "contract_closed" quando um trade fecha
-  // Detectado pela diminuição de openTrades para este bot
-  const prevOpenCountRef = useState<number>(0)
-  useEffect(() => {
-    if (!isRunning || !sessionBotId) return
-    const count = Object.values(openTrades).filter(t => t.botId === sessionBotId).length
-    const prev  = prevOpenCountRef[0]
-    if (prev > 0 && count === 0) {
-      // Contrato acabou de fechar — mostrar step 2 brevemente
-      setProgressStep(2)
-      const timer = setTimeout(() => setProgressStep(0), 1200)
-      prevOpenCountRef[1](count)
-      return () => clearTimeout(timer)
-    }
-    prevOpenCountRef[1](count)
-  }, [openTrades, isRunning, sessionBotId]) // eslint-disable-line react-hooks/exhaustive-deps
-
   const steps = ['Analisando', 'Contrato aberto', 'Contrato fechado']
 
+  // Animar barra suavemente
   useEffect(() => {
     const target = isRunning && progressStep >= 0
       ? ((progressStep + 1) / steps.length) * 100
@@ -310,20 +309,35 @@ export function ControlsSection() {
     return () => clearInterval(id)
   }, [isRunning, progressStep, steps.length])
 
+  // ── FIX 3: Lucro/Prejuízo derivado dos trades reais ──────────────────────
+  // Calculado directamente dos trades do bots-context (mesma fonte que a tabela).
+  // Assim garante-se que o valor exibido aqui é idêntico ao da tabela.
+  const { netPnL, totalWins, totalLosses } = useMemo(() => {
+    const active = sessionBots.filter(b => b.stats.totalTrades > 0 || b.status === 'running')
+    return {
+      netPnL:      active.reduce((s, b) => s + b.stats.netPnL,  0),
+      totalWins:   active.reduce((s, b) => s + b.stats.wins,    0),
+      totalLosses: active.reduce((s, b) => s + b.stats.losses,  0),
+    }
+  }, [sessionBots])
+
   // ── Botão Play/Stop ───────────────────────────────────────────────────────
+  // FIX: usa sessionBotIdRef.current (síncrono) em vez de sessionBotId (estado async)
   const handleToggle = () => {
     if (!selectedBot) return
 
-    if (isRunning && sessionBotId) {
-      stopBot(sessionBotId)
+    const currentId = sessionBotIdRef.current
+    const currentBot = currentId ? sessionBots.find(b => b.id === currentId) : null
+
+    if (currentBot?.status === 'running') {
+      stopBot(currentId!)
       return
     }
-    if (isPaused && sessionBotId) {
-      resumeBot(sessionBotId)
+    if (currentBot?.status === 'paused') {
+      resumeBot(currentId!)
       return
     }
-    // Iniciar — o sessionBotId será preenchido pelo useEffect acima
-    // quando o backend confirmar bot:started
+    // Iniciar novo bot
     startCatalogBot(selectedBot.id, undefined, pendingConfig ?? undefined)
   }
 
@@ -397,7 +411,7 @@ export function ControlsSection() {
               <div className="absolute top-full left-0 right-0 mt-2 bg-[#111827] rounded-xl shadow-xl border border-[#1f2a3c] py-1 z-50 max-h-56 overflow-y-auto">
                 {catalogBots.map(b => (
                   <button key={b.id}
-                    onClick={() => { setSelectedBot(b); setPendingConfig(null); setSessionBotId(null); setShowBotDrop(false) }}
+                    onClick={() => { setSelectedBot(b); setPendingConfig(null); setSessionBotIdSync(null); setShowBotDrop(false) }}
                     className={`w-full px-4 py-2.5 text-left hover:bg-[#1f2a3c] transition-colors ${selectedBot?.id === b.id ? 'bg-[#1f2a3c]' : ''}`}>
                     <p className="text-sm text-white font-medium truncate">{b.name}</p>
                     <p className="text-[10px] text-gray-500 mt-0.5">{STRATEGY_LABELS[b.strategy]}</p>
@@ -464,6 +478,33 @@ export function ControlsSection() {
             </div>
           </div>
         </div>
+
+        {/* Lucro/Prejuízo em tempo real — alimentado pelos trades reais */}
+        {(sessionBots.some(b => b.stats.totalTrades > 0 || b.status === 'running')) && (
+          <div className="flex items-center gap-4 px-3 py-2.5 rounded-xl bg-[#1a2235] border border-[#2a3142]">
+            <div>
+              <p className="text-gray-500 text-[10px]">Lucro/Prejuízo</p>
+              <p className={`text-base font-bold font-mono tabular-nums ${netPnL >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+                {/* Prejuízo com sinal menos, lucro sem sinal */}
+                {netPnL < 0 ? '-' : ''}${Math.abs(netPnL).toFixed(2)}
+              </p>
+            </div>
+            <div className="h-8 w-px bg-[#2a3142]" />
+            <div>
+              <p className="text-gray-500 text-[10px]">Operações</p>
+              <p className="text-sm font-mono">
+                <span className="text-[#22c55e] font-bold">{totalWins}</span>
+                <span className="text-gray-600 mx-0.5">/</span>
+                <span className="text-[#ef4444] font-bold">{totalLosses}</span>
+              </p>
+            </div>
+            <div className="h-8 w-px bg-[#2a3142]" />
+            <div>
+              <p className="text-gray-500 text-[10px]">Trades</p>
+              <p className="text-sm font-bold text-white">{trades.length}</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {showConfig && selectedBot && (
