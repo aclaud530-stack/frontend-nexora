@@ -114,15 +114,22 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
         }
 
         // ── Eventos do BotManager (bot:started, bot:trade_closed, …)
-        // O server.ts emite directamente o BotEventType como type
-        // payload = { botId, ...rest }
+        // O server.ts emite o BotEventType como type, com
+        // payload = { botId, ...rest } aninhado em msg.payload.
         default:
           if ((msg.type as string).startsWith('bot:')) {
-            const p = (payload ?? {}) as Record<string, unknown>
+            const nested = (payload ?? {}) as Record<string, unknown>
+            const root   = (msg as Record<string, unknown>)
+            // Tolerante a ambos os formatos: aninhado em payload (formato
+            // atual do backend) ou na raiz da mensagem (defensivo).
+            const botId = typeof nested.botId === 'string' ? nested.botId
+                        : typeof root.botId   === 'string' ? root.botId
+                        : ''
+            const evPayload = Object.keys(nested).length > 0 ? nested : root
             cbRef.current.onBotEvent?.({
               type:    msg.type as BotEventType,
-              botId:   typeof p.botId === 'string' ? p.botId : '',
-              payload: p,
+              botId,
+              payload: evPayload,
             })
             break
           }
@@ -130,13 +137,19 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
           // ── Erro do servidor ──────────────────────────────
           if (msg.type === 'error') {
             const p = payload as Record<string, unknown>
+            const rootMsg = (msg as Record<string, unknown>)
             const errMsg = typeof p?.message === 'string' ? p.message
                          : typeof p?.error   === 'string' ? p.error
                          : typeof payload    === 'string' ? payload
+                         // tolerância extra: caso o backend envie code/message
+                         // na raiz da mensagem em vez de aninhados em payload
+                         : typeof rootMsg?.message === 'string' ? rootMsg.message
+                         : typeof rootMsg?.error   === 'string' ? rootMsg.error
                          : 'Erro desconhecido'
             cbRef.current.onError?.(errMsg as string)
             break
           }
+
 
           // ── Confirmação de autenticação ───────────────────
           // Sempre que a sessão fica autenticada, pedimos o catálogo
