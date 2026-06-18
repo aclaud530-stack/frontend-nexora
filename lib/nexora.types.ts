@@ -128,65 +128,95 @@ export interface StrategyFieldDef {
   group?:       string
 }
 
-// ─── Campos comuns (BotConfig) ────────────────────────────────
-export const COMMON_CONFIG_FIELDS: StrategyFieldDef[] = [
-  {
-    key: 'symbol', label: 'Símbolo', type: 'select', defaultValue: 'R_100', group: 'Contrato',
-    options: [
-      { value: 'R_10',    label: 'Volatility 10 Index' },
-      { value: 'R_25',    label: 'Volatility 25 Index' },
-      { value: 'R_50',    label: 'Volatility 50 Index' },
-      { value: 'R_75',    label: 'Volatility 75 Index' },
-      { value: 'R_100',   label: 'Volatility 100 Index' },
-      { value: '1HZ10V',  label: 'Volatility 10 (1s)' },
-      { value: '1HZ100V', label: 'Volatility 100 (1s)' },
-    ],
-  },
-  {
-    key: 'contractType', label: 'Tipo de Contrato', type: 'select', defaultValue: 'CALL', group: 'Contrato',
-    options: [
-      { value: 'CALL',       label: 'Rise (Call)' },
-      { value: 'PUT',        label: 'Fall (Put)' },
-      { value: 'DIGITOVER',  label: 'Digit Over' },
-      { value: 'DIGITUNDER', label: 'Digit Under' },
-      { value: 'DIGITEVEN',  label: 'Digit Even' },
-      { value: 'DIGITODD',   label: 'Digit Odd' },
-    ],
-  },
-  {
-    key: 'duration', label: 'Duração', type: 'number',
-    defaultValue: 5, min: 1, max: 365, step: 1, group: 'Contrato',
-  },
-  {
-    key: 'durationUnit', label: 'Unidade', type: 'select', defaultValue: 'ticks', group: 'Contrato',
-    options: [
-      { value: 'ticks', label: 'Ticks' },
-      { value: 's',     label: 'Segundos' },
-      { value: 'm',     label: 'Minutos' },
-      { value: 'h',     label: 'Horas' },
-      { value: 'd',     label: 'Dias' },
-    ],
-  },
-  {
-    key: 'initialStake', label: 'Stake Inicial (USD)', type: 'number',
-    defaultValue: 1, min: 0.35, step: 0.01, group: 'Risco',
-    description: 'Valor apostado no primeiro contrato',
-  },
-  {
-    key: 'maxLoss', label: 'Perda Máxima (USD)', type: 'number',
-    defaultValue: 20, min: 1, step: 0.5, group: 'Risco',
-    description: 'Para o bot quando a perda acumulada atingir este valor',
-  },
-  {
-    key: 'maxProfit', label: 'Take Profit (USD)', type: 'number',
-    defaultValue: 50, min: 1, step: 0.5, group: 'Risco',
-    description: 'Para o bot quando o lucro acumulado atingir este valor',
-  },
-  {
-    key: 'maxTrades', label: 'Máx. Trades (0 = ilimitado)', type: 'number',
-    defaultValue: 0, min: 0, step: 1, group: 'Risco',
-  },
+// ─── Opções de símbolo (comuns a todas as estratégias) ───────
+const SYMBOL_OPTIONS = [
+  { value: 'R_10',    label: 'Volatility 10 Index' },
+  { value: 'R_25',    label: 'Volatility 25 Index' },
+  { value: 'R_50',    label: 'Volatility 50 Index' },
+  { value: 'R_75',    label: 'Volatility 75 Index' },
+  { value: 'R_100',   label: 'Volatility 100 Index' },
+  { value: '1HZ10V',  label: 'Volatility 10 (1s)' },
+  { value: '1HZ100V', label: 'Volatility 100 (1s)' },
 ]
+
+// ─── Tipos de contrato compatíveis ───────────────────────────
+// IMPORTANTE: tipos DIGIT* (DIGITOVER, DIGITUNDER, etc.) exigem
+// um parâmetro "barrier" que o sistema não suporta ainda.
+// Ficam de fora para evitar "Input validation failed: parameters".
+// Todas as estratégias actuais (scalping, martingale, trend) usam
+// apenas CALL / PUT.
+const CALL_PUT_OPTIONS = [
+  { value: 'CALL', label: 'Rise (Call)' },
+  { value: 'PUT',  label: 'Fall (Put)'  },
+]
+
+// ─── Unidades de duração seguras ─────────────────────────────
+// Minutos/horas/dias têm stake mínimo muito mais alto na Deriv,
+// por isso apenas ticks e segundos são expostos por defeito.
+const DURATION_UNIT_OPTIONS = [
+  { value: 'ticks', label: 'Ticks' },
+  { value: 's',     label: 'Segundos' },
+]
+
+// ─── Campos comuns por estratégia ────────────────────────────
+// Cada estratégia expõe apenas os campos que fazem sentido para ela.
+// Os valores defaultValue aqui são substituídos em ConfigModal pelos
+// valores reais do defaultConfig do bot seleccionado no catálogo.
+function buildCommonFields(_strategy: BotStrategyType): StrategyFieldDef[] {
+  return [
+    {
+      key: 'symbol', label: 'Símbolo', type: 'select',
+      defaultValue: '1HZ100V', group: 'Contrato',
+      options: SYMBOL_OPTIONS,
+    },
+    {
+      key: 'contractType', label: 'Tipo de Contrato', type: 'select',
+      defaultValue: 'CALL', group: 'Contrato',
+      options: CALL_PUT_OPTIONS,
+    },
+    {
+      key: 'duration', label: 'Duração', type: 'number',
+      defaultValue: 5, min: 1, max: 60, step: 1, group: 'Contrato',
+      description: 'Ticks: 1–10 recomendado. Segundos: 15–60.',
+    },
+    {
+      key: 'durationUnit', label: 'Unidade', type: 'select',
+      defaultValue: 'ticks', group: 'Contrato',
+      options: DURATION_UNIT_OPTIONS,
+    },
+    {
+      key: 'initialStake', label: 'Stake Inicial (USD)', type: 'number',
+      defaultValue: 1, min: 0.35, step: 0.01, group: 'Risco',
+      description: 'Valor apostado no primeiro contrato (mín. $0.35)',
+    },
+    {
+      key: 'maxLoss', label: 'Perda Máxima (USD)', type: 'number',
+      defaultValue: 20, min: 1, step: 0.5, group: 'Risco',
+      description: 'Para o bot quando a perda acumulada atingir este valor',
+    },
+    {
+      key: 'maxProfit', label: 'Take Profit (USD)', type: 'number',
+      defaultValue: 50, min: 1, step: 0.5, group: 'Risco',
+      description: 'Para o bot quando o lucro acumulado atingir este valor',
+    },
+    {
+      key: 'maxTrades', label: 'Máx. Trades (0 = ilimitado)', type: 'number',
+      defaultValue: 0, min: 0, step: 1, group: 'Risco',
+    },
+  ]
+}
+
+// ─── API pública ──────────────────────────────────────────────
+
+// Compatibilidade: exporta a lista para o código que ainda usa
+// COMMON_CONFIG_FIELDS directamente (ex: código legado).
+export const COMMON_CONFIG_FIELDS: StrategyFieldDef[] = buildCommonFields('scalping')
+
+// Função preferida: devolve os campos filtrados para a estratégia
+// do bot seleccionado. Usar isto em ConfigModal.
+export function getCommonConfigFields(strategy: BotStrategyType): StrategyFieldDef[] {
+  return buildCommonFields(strategy)
+}
 
 // ─── Parâmetros específicos por estratégia (strategyParams) ───
 export const STRATEGY_PARAMS_FIELDS: Record<BotStrategyType, StrategyFieldDef[]> = {
@@ -198,7 +228,7 @@ export const STRATEGY_PARAMS_FIELDS: Record<BotStrategyType, StrategyFieldDef[]>
     },
     {
       key: 'maxStake', label: 'Stake Máximo (USD)', type: 'number',
-      defaultValue: 100, min: 1, step: 1, group: 'Martingale',
+      defaultValue: 64, min: 1, step: 1, group: 'Martingale',
       description: 'Teto do stake para evitar apostas explosivas',
     },
     {
@@ -215,7 +245,7 @@ export const STRATEGY_PARAMS_FIELDS: Record<BotStrategyType, StrategyFieldDef[]>
     },
     {
       key: 'maxStake', label: 'Stake Máximo (USD)', type: 'number',
-      defaultValue: 100, min: 1, step: 1, group: 'Anti-Martingale',
+      defaultValue: 64, min: 1, step: 1, group: 'Anti-Martingale',
     },
     {
       key: 'resetOnWin', label: 'Modo Anti-Martingale', type: 'toggle',
@@ -225,8 +255,8 @@ export const STRATEGY_PARAMS_FIELDS: Record<BotStrategyType, StrategyFieldDef[]>
   scalping: [
     {
       key: 'maxConsecutiveLosses', label: 'Perdas Consecutivas Máx.', type: 'number',
-      defaultValue: 3, min: 1, step: 1, group: 'Scalping',
-      description: 'Pausa o bot após N perdas seguidas',
+      defaultValue: 3, min: 0, step: 1, group: 'Scalping',
+      description: 'Pausa o bot após N perdas seguidas (0 = nunca pausar)',
     },
   ],
   trend_following: [
