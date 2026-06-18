@@ -1,5 +1,6 @@
 'use client'
 
+import { useTrading } from '@/lib/trading-context'
 import { useBots } from '@/lib/bots-context'
 import { useEffect, useState, useRef, useMemo } from 'react'
 
@@ -32,83 +33,74 @@ function useAnimatedNumber(target: number, duration = 650) {
 // ── BalanceCard ───────────────────────────────────────────────────────────────
 
 export function BalanceCard() {
-  // Lê dados reais dos bots — profit/wins/losses em tempo real via bots-context
-  const { sessionBots, trades } = useBots()
+  // Saldo real em tempo real vem do trading-context (WebSocket Deriv)
+  const { balance, currency, loading } = useTrading()
 
-  // Calcular métricas agregadas de todos os bots da sessão
+  // PnL, wins e losses em tempo real vêm dos bots reais (bots-context)
+  const { sessionBots } = useBots()
+
   const { netPnL, totalWins, totalLosses } = useMemo(() => {
-    const allBots = sessionBots.filter(b => b.stats.totalTrades > 0 || b.status === 'running')
+    const active = sessionBots.filter(b => b.stats.totalTrades > 0 || b.status === 'running')
     return {
-      netPnL:      allBots.reduce((s, b) => s + b.stats.netPnL,  0),
-      totalWins:   allBots.reduce((s, b) => s + b.stats.wins,    0),
-      totalLosses: allBots.reduce((s, b) => s + b.stats.losses,  0),
+      netPnL:      active.reduce((s, b) => s + b.stats.netPnL,  0),
+      totalWins:   active.reduce((s, b) => s + b.stats.wins,    0),
+      totalLosses: active.reduce((s, b) => s + b.stats.losses,  0),
     }
   }, [sessionBots])
 
-  // Calcular saldo estimado a partir do último trade (profit acumulado)
-  // O saldo real vem do trading-context (WebSocket Deriv), mas como o BalanceCard
-  // agora foca nos bots, mostramos o PnL líquido da sessão de bots
-  const displayProfit  = useAnimatedNumber(netPnL,      700)
-  const displayWins    = useAnimatedNumber(totalWins,   300)
-  const displayLosses  = useAnimatedNumber(totalLosses, 300)
+  const displayBalance = useAnimatedNumber(balance, 700)
+  const displayProfit  = useAnimatedNumber(netPnL,  700)
 
-  const isProfit    = netPnL >= 0
-  const totalTrades = totalWins + totalLosses
+  const isProfit = netPnL >= 0
 
   return (
-    <div
-      className="relative rounded-xl overflow-hidden border-2 border-[#2a3142] shadow-lg"
+    <div className="relative rounded-xl overflow-hidden border-2 border-[#2a3142] shadow-lg"
       style={{ background: 'linear-gradient(135deg, #0d1117 0%, #1a1f2e 100%)' }}
     >
-      <div className="flex">
-        {/* Trades */}
-        <div className="flex-1 p-4 bg-[#0d1117] border-r border-[#2a3142]">
-          <div className="mb-2">
-            <p className="text-gray-400 text-xs font-medium">Operações</p>
-          </div>
-          <div className="flex items-end gap-3">
-            <p className="text-white text-xl sm:text-2xl font-bold tracking-tight tabular-nums">
-              {Math.round(displayWins + displayLosses)}
-            </p>
-          </div>
-          {/* W / L inline com cores */}
-          <div className="flex items-center gap-1 mt-2 text-xs font-mono">
-            <span className="text-[#22c55e] font-bold">{Math.round(displayWins)}</span>
-            <span className="text-gray-600">/</span>
-            <span className="text-[#ef4444] font-bold">{Math.round(displayLosses)}</span>
-            {totalTrades > 0 && (
-              <span className="text-gray-600 text-[10px] ml-1">
-                ({((totalWins / totalTrades) * 100).toFixed(0)}% win)
-              </span>
-            )}
+      {/* Loader inicial */}
+      {loading && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center rounded-xl
+          bg-[#0d1117]/80 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-2">
+            <div className="relative w-7 h-7">
+              <div className="absolute inset-0 rounded-full border-2 border-[#2ec7ff]/15" />
+              <div className="absolute inset-0 rounded-full border-2 border-transparent
+                border-t-[#2ec7ff] animate-spin" />
+            </div>
+            <span className="text-gray-500 text-[9px] uppercase tracking-widest">A carregar…</span>
           </div>
         </div>
+      )}
 
-        {/* Lucro/Prejuízo */}
+      <div className="flex">
+        {/* Saldo — vem do WebSocket Deriv em tempo real */}
+        <div className="flex-1 p-4 bg-[#0d1117] border-r border-[#2a3142]">
+          <div className="mb-2">
+            <p className="text-gray-400 text-xs font-medium">Saldo</p>
+          </div>
+          <p className="text-white text-xl sm:text-2xl font-bold tracking-tight tabular-nums">
+            <span className="text-gray-500 text-base">$</span>{' '}
+            {displayBalance.toFixed(2)}{' '}
+            <span className="text-sm font-normal text-gray-500">{currency}</span>
+          </p>
+        </div>
+
+        {/* Lucro/Prejuízo — vem dos bots reais em tempo real */}
         <div className="flex-1 p-4 bg-[#1a1f2e] flex flex-col justify-between">
           <p className="text-gray-400 text-xs mb-2 font-medium">Lucro/Prejuízo</p>
-          <p
-            className={`text-xl sm:text-2xl font-bold tracking-tight tabular-nums transition-colors duration-500 ${
-              isProfit ? 'text-[#22c55e]' : 'text-[#ef4444]'
-            }`}
-          >
+          <p className={`text-xl sm:text-2xl font-bold tracking-tight tabular-nums transition-colors duration-500 ${isProfit ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
             <span className="text-base opacity-70">$</span>{' '}
-            {/* Prejuízo com sinal de menos, lucro sem sinal */}
+            {/* Prejuízo com sinal menos, lucro sem sinal */}
             {netPnL < 0 ? '-' : ''}
             {Math.abs(displayProfit).toFixed(2)}
           </p>
 
-          {/* Indicador em tempo real */}
-          <div className="flex items-center gap-1.5 mt-2">
-            {sessionBots.some(b => b.status === 'running') && (
-              <span className="relative flex h-2 w-2 shrink-0">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#22c55e] opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-[#22c55e]" />
-              </span>
-            )}
-            <span className="text-gray-600 text-[10px]">
-              {trades.length > 0 ? `${trades.length} trade${trades.length !== 1 ? 's' : ''}` : 'Sem trades'}
-            </span>
+          {/* W / L em tempo real */}
+          <div className="flex items-center gap-1 mt-2 text-gray-400 text-xs">
+            <span>Operações</span>
+            <span className="text-[#22c55e] font-bold">{totalWins}</span>
+            <span>/</span>
+            <span className="text-[#ef4444] font-bold">{totalLosses}</span>
           </div>
         </div>
       </div>
