@@ -6,7 +6,7 @@ import { useTrading } from '@/lib/trading-context'
 import { useBots } from '@/lib/bots-context'
 import {
   BotConfig,
-  COMMON_CONFIG_FIELDS, STRATEGY_PARAMS_FIELDS, STRATEGY_LABELS, StrategyFieldDef,
+  getCommonConfigFields, STRATEGY_PARAMS_FIELDS, STRATEGY_LABELS, StrategyFieldDef,
 } from '@/lib/nexora.types'
 import { CatalogBot } from '@/lib/use-nexora-ws'
 import { useLoader } from '@/components/loader'
@@ -82,26 +82,40 @@ function ConfigModal({ bot, onClose, onConfirm }: {
   onClose: () => void
   onConfirm: (config: Partial<BotConfig>) => void
 }) {
+  // Campos comuns filtrados para esta estratégia específica
+  const commonFields = useMemo(() => getCommonConfigFields(bot.strategy), [bot.strategy])
+
   const [cfgVals, setCfgVals] = useState<Record<string, unknown>>(() => {
     const v: Record<string, unknown> = {}
-    COMMON_CONFIG_FIELDS.forEach(f => { v[f.key] = f.defaultValue })
+    // Pré-popular com os valores do defaultConfig do bot (catálogo),
+    // não com valores genéricos — assim o utilizador parte dos valores
+    // que o admin configurou para este bot específico.
+    commonFields.forEach(f => {
+      const catalogVal = (bot.defaultConfig as Record<string, unknown>)[f.key]
+      v[f.key] = catalogVal !== undefined ? catalogVal : f.defaultValue
+    })
     return v
   })
+
   const [prmVals, setPrmVals] = useState<Record<string, unknown>>(() => {
     const v: Record<string, unknown> = {}
-    ;(STRATEGY_PARAMS_FIELDS[bot.strategy] ?? []).forEach(f => { v[f.key] = f.defaultValue })
+    const strategyFields = STRATEGY_PARAMS_FIELDS[bot.strategy] ?? []
+    strategyFields.forEach(f => {
+      const catalogVal = (bot.defaultConfig.strategyParams ?? {})[f.key]
+      v[f.key] = catalogVal !== undefined ? catalogVal : f.defaultValue
+    })
     return v
   })
 
   const configGroups = useMemo(() => {
     const g: Record<string, StrategyFieldDef[]> = {}
-    COMMON_CONFIG_FIELDS.forEach(f => {
+    commonFields.forEach(f => {
       const k = f.group ?? 'Geral'
       if (!g[k]) g[k] = []
       g[k].push(f)
     })
     return g
-  }, [])
+  }, [commonFields])
 
   const strategyFields = STRATEGY_PARAMS_FIELDS[bot.strategy] ?? []
 
