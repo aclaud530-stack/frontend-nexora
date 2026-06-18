@@ -6,13 +6,14 @@
 //                 → configura parâmetros → executa na sessão
 // ============================================================
 
-import { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useRef, useMemo, ReactNode } from 'react'
 import {
   BotSummary, BotState, BotEvent, BotLogEntry,
   BotStats, BotConfig, BotStrategyType,
   TradeClosedPayload, TradeOpenedPayload,
 } from './nexora.types'
 import { useNexoraWs, WsStatus, CatalogBot } from './use-nexora-ws'
+import { useAuth } from './auth-context'
 
 // ─── TradeRecord para a UI ────────────────────────────────────
 
@@ -96,6 +97,23 @@ export function useBots() {
 const MAX_TRADES = 300
 
 export function BotsProvider({ children }: { children: ReactNode }) {
+  // Token/conta da sessão Deriv — necessários para autenticar esta
+  // ligação WS no backend Nexora. Sem isto, o backend nunca marca a
+  // sessão como autenticada e start_catalog_bot/stop_bot/etc. falham
+  // sempre com "Not authenticated".
+  // Mesmo padrão usado em TradingProviderWithAuth (providers.tsx):
+  // espera isLoading terminar e usa fallback de localStorage para a conta.
+  const { isLoading, currentAccount } = useAuth()
+  const { token, accountId } = useMemo(() => {
+    if (isLoading || typeof window === 'undefined') {
+      return { token: null as string | null, accountId: null as string | null }
+    }
+    return {
+      token:     localStorage.getItem('token') || null,
+      accountId: currentAccount?.account_id || localStorage.getItem('currentAccountId') || null,
+    }
+  }, [isLoading, currentAccount?.account_id])
+
   // Catálogo (gerido pelo admin, só leitura para o utilizador)
   const [catalogBots,     setCatalogBots]     = useState<CatalogBot[]>([])
   const [isLoadingCatalog, setIsLoadingCatalog] = useState(true)
@@ -266,6 +284,8 @@ export function BotsProvider({ children }: { children: ReactNode }) {
     onBotEvent:          handleBotEvent,
     onBotLogs:           handleBotLogs,
     onError:             showError,
+    token,
+    accountId,
   })
 
   const clearTrades = useCallback(() => {
