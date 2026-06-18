@@ -91,7 +91,7 @@ function ConfigModal({ bot, onClose, onConfirm }: {
     // não com valores genéricos — assim o utilizador parte dos valores
     // que o admin configurou para este bot específico.
     commonFields.forEach(f => {
-      const catalogVal = (bot.defaultConfig as Record<string, unknown>)[f.key]
+      const catalogVal = (bot.defaultConfig as unknown as Record<string, unknown>)[f.key]
       v[f.key] = catalogVal !== undefined ? catalogVal : f.defaultValue
     })
     return v
