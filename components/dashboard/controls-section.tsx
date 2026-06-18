@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useMemo } from 'react'
 import { useAuth } from '@/lib/auth-context'
-import { useTrading } from '@/lib/trading-context'
 import { useBots } from '@/lib/bots-context'
 import {
   BotConfig,
@@ -82,14 +81,10 @@ function ConfigModal({ bot, onClose, onConfirm }: {
   onClose: () => void
   onConfirm: (config: Partial<BotConfig>) => void
 }) {
-  // Campos comuns filtrados para esta estratégia específica
   const commonFields = useMemo(() => getCommonConfigFields(bot.strategy), [bot.strategy])
 
   const [cfgVals, setCfgVals] = useState<Record<string, unknown>>(() => {
     const v: Record<string, unknown> = {}
-    // Pré-popular com os valores do defaultConfig do bot (catálogo),
-    // não com valores genéricos — assim o utilizador parte dos valores
-    // que o admin configurou para este bot específico.
     commonFields.forEach(f => {
       const catalogVal = (bot.defaultConfig as unknown as Record<string, unknown>)[f.key]
       v[f.key] = catalogVal !== undefined ? catalogVal : f.defaultValue
@@ -206,10 +201,10 @@ function ConfigModal({ bot, onClose, onConfirm }: {
 
 export function ControlsSection() {
   const { accounts, currentAccount, setCurrentAccount } = useAuth()
-  const { botStatus } = useTrading()
   const {
     catalogBots,
     sessionBots,
+    botStates,
     wsStatus,
     isLoadingCatalog,
     lastError,
@@ -225,45 +220,85 @@ export function ControlsSection() {
   const [showConfig,    setShowConfig]    = useState(false)
   const [selectedBot,   setSelectedBot]   = useState<CatalogBot | null>(null)
   const [pendingConfig, setPendingConfig] = useState<Partial<BotConfig> | null>(null)
-  const [sessionBotId,  setSessionBotId]  = useState<string | null>(null)
-  const [animProgress,  setAnimProgress]  = useState(0)
 
+  // sessionBotId: ID do bot activo nesta sessão
+  // Actualizado imediatamente ao iniciar (não depende só do useEffect)
+  const [sessionBotId, setSessionBotId] = useState<string | null>(null)
+
+  const [animProgress, setAnimProgress] = useState(0)
+
+  // Pré-seleccionar primeiro bot do catálogo
   useEffect(() => {
     if (!selectedBot && catalogBots.length > 0) setSelectedBot(catalogBots[0])
-  }, [catalogBots])
+  }, [catalogBots, selectedBot])
 
-  // Detectar bot iniciado na sessão
+  // Sincronizar sessionBotId com bots activos da sessão
+  // (cobre o caso de recarregar a página com bot já em curso)
   useEffect(() => {
     if (sessionBotId) return
     const active = sessionBots.filter(b => b.status === 'running' || b.status === 'paused')
     if (active.length > 0) setSessionBotId(active[active.length - 1].id)
   }, [sessionBots, sessionBotId])
 
+  // Bot activo em tempo real
   const liveBot   = sessionBotId ? sessionBots.find(b => b.id === sessionBotId) ?? null : null
   const isRunning = liveBot?.status === 'running'
   const isPaused  = liveBot?.status === 'paused'
 
-  const stepMap: Record<string, number> = { idle: -1, analyzing: 0, contract_open: 1, contract_closed: 2 }
-  const activeStep = stepMap[botStatus?.currentStep ?? 'idle'] ?? -1
+  // Barra de progresso: lê o currentStep do BotState (bots-context),
+  // não do trading-context que é o bot antigo/independente
+  const liveState   = sessionBotId ? botStates[sessionBotId] ?? null : null
+  const currentStep = liveState?.currentStep ?? (isRunning ? 'analyzing' : 'idle')
+
+  const stepMap: Record<string, number> = {
+    idle: -1, analyzing: 0, contract_open: 1, contract_closed: 2,
+  }
+  const activeStep = stepMap[currentStep] ?? -1
   const steps = ['Analisando', 'Contrato aberto', 'Contrato fechado']
 
+  // Animar barra de progresso
   useEffect(() => {
-    const target = isRunning && activeStep >= 0 ? ((activeStep + 1) / steps.length) * 100 : 0
-    const id = setInterval(() => setAnimProgress(p => {
-      const d = target - p
-      return Math.abs(d) < 0.5 ? target : p + d * 0.1
-    }), 16)
+    const target = isRunning && activeStep >= 0
+      ? ((activeStep + 1) / steps.length) * 100
+      : 0
+    const id = setInterval(() => {
+      setAnimProgress(p => {
+        const d = target - p
+        return Math.abs(d) < 0.5 ? target : p + d * 0.1
+      })
+    }, 16)
     return () => clearInterval(id)
-  }, [isRunning, activeStep])
+  }, [isRunning, activeStep, steps.length])
 
   const handleToggle = () => {
     if (!selectedBot) return
-    if (isRunning && sessionBotId)     stopBot(sessionBotId)
-    else if (isPaused && sessionBotId) resumeBot(sessionBotId)
-    else {
-      startCatalogBot(selectedBot.id, undefined, pendingConfig ?? undefined)
+
+    if (isRunning && sessionBotId) {
+      // Para o bot imediatamente
+      stopBot(sessionBotId)
+      return
     }
+
+    if (isPaused && sessionBotId) {
+      resumeBot(sessionBotId)
+      return
+    }
+
+    // Iniciar novo bot — gera um ID optimista para o botão responder imediatamente
+    // O ID real chegará via handleBotStarted, mas o sessionBotId será actualizado
+    // pelo useEffect de sincronização quando o bot aparecer em sessionBots
+    startCatalogBot(selectedBot.id, undefined, pendingConfig ?? undefined)
   }
+
+  // Quando o bot for parado/terminado, limpar o sessionBotId
+  // para o botão voltar ao estado "play"
+  useEffect(() => {
+    if (!sessionBotId) return
+    const bot = sessionBots.find(b => b.id === sessionBotId)
+    if (bot && (bot.status === 'stopped' || bot.status === 'error')) {
+      setSessionBotId(null)
+    }
+  }, [sessionBots, sessionBotId])
 
   const handleAccSelect = async (acc: typeof accounts[number]) => {
     setShowAccDrop(false)
@@ -335,7 +370,12 @@ export function ControlsSection() {
               <div className="absolute top-full left-0 right-0 mt-2 bg-[#111827] rounded-xl shadow-xl border border-[#1f2a3c] py-1 z-50 max-h-56 overflow-y-auto">
                 {catalogBots.map(b => (
                   <button key={b.id}
-                    onClick={() => { setSelectedBot(b); setPendingConfig(null); setSessionBotId(null); setShowBotDrop(false) }}
+                    onClick={() => {
+                      setSelectedBot(b)
+                      setPendingConfig(null)
+                      setSessionBotId(null)
+                      setShowBotDrop(false)
+                    }}
                     className={`w-full px-4 py-2.5 text-left hover:bg-[#1f2a3c] transition-colors ${selectedBot?.id === b.id ? 'bg-[#1f2a3c]' : ''}`}>
                     <p className="text-sm text-white font-medium truncate">{b.name}</p>
                     <p className="text-[10px] text-gray-500 mt-0.5">{STRATEGY_LABELS[b.strategy]}</p>
@@ -354,14 +394,16 @@ export function ControlsSection() {
           </div>
         </div>
 
-        {/* Engrenagem + Play + Barra */}
+        {/* Engrenagem + Play/Stop + Barra */}
         <div className="flex items-center gap-4">
           <button
             onClick={() => selectedBot && setShowConfig(true)}
             disabled={!selectedBot}
             title="Configurar parâmetros"
             className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed
-              ${pendingConfig ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]' : 'border-[#2a3142] bg-[#1e2535] text-gray-400 hover:border-[#3b82f6] hover:text-[#3b82f6] hover:bg-[#242f45]'}`}>
+              ${pendingConfig
+                ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]'
+                : 'border-[#2a3142] bg-[#1e2535] text-gray-400 hover:border-[#3b82f6] hover:text-[#3b82f6] hover:bg-[#242f45]'}`}>
             <Ico.Gear />
           </button>
 
@@ -372,7 +414,7 @@ export function ControlsSection() {
               !selectedBot || wsStatus !== 'connected'
                 ? 'opacity-40 cursor-not-allowed border-gray-700 bg-transparent'
                 : isRunning
-                  ? 'border-[#dc2626] bg-transparent hover:bg-[#dc2626]/10'
+                  ? 'border-[#dc2626] bg-[#dc2626]/10 hover:bg-[#dc2626]/20'
                   : isPaused
                     ? 'border-[#f59e0b] bg-[#f59e0b]/10 hover:bg-[#f59e0b]/20'
                     : 'border-[#22c55e] bg-[#22c55e]/10 hover:bg-[#22c55e]/20'
@@ -388,14 +430,24 @@ export function ControlsSection() {
           <div className="flex-1 min-w-0">
             <div className="flex justify-between mb-2">
               {steps.map((s, i) => (
-                <span key={s} className={`text-[10px] sm:text-xs font-medium transition-colors ${i <= activeStep ? 'text-white' : 'text-gray-600'}`}>{s}</span>
+                <span key={s}
+                  className={`text-[10px] sm:text-xs font-medium transition-colors ${i <= activeStep ? 'text-white' : 'text-gray-600'}`}>
+                  {s}
+                </span>
               ))}
             </div>
             <div className="relative h-1 bg-[#2a3142] rounded-full">
-              <div className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500" style={{ width: `${animProgress}%` }} />
+              <div
+                className="absolute h-full bg-[#3b82f6] rounded-full transition-all duration-500"
+                style={{ width: `${animProgress}%` }}
+              />
               {steps.map((_, i) => (
                 <div key={i}
-                  className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 transition-all ${i <= activeStep ? 'bg-white border-[#3b82f6] scale-110' : 'bg-[#1e2535] border-[#3a4255]'}`}
+                  className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full border-2 transition-all ${
+                    i <= activeStep
+                      ? 'bg-white border-[#3b82f6] scale-110'
+                      : 'bg-[#1e2535] border-[#3a4255]'
+                  }`}
                   style={{ left: `calc(${(i / (steps.length - 1)) * 100}% - 6px)` }}
                 />
               ))}
@@ -405,7 +457,11 @@ export function ControlsSection() {
       </div>
 
       {showConfig && selectedBot && (
-        <ConfigModal bot={selectedBot} onClose={() => setShowConfig(false)} onConfirm={setPendingConfig} />
+        <ConfigModal
+          bot={selectedBot}
+          onClose={() => setShowConfig(false)}
+          onConfirm={setPendingConfig}
+        />
       )}
     </>
   )
