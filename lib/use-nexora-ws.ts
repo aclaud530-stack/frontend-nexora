@@ -41,6 +41,12 @@ interface NexoraWsCallbacks {
   onBotLogs?:          (botId: string, logs: BotLogEntry[]) => void
   // Erros
   onError?:            (msg: string) => void
+  // Token OAuth da Deriv (de useAuth/localStorage) e conta activa —
+  // necessários para autenticar a sessão no backend Nexora. Sem isto,
+  // o backend nunca chama session.authenticated = true e qualquer
+  // acção de bot falha com "Not authenticated".
+  token?:              string | null
+  accountId?:          string | null
 }
 
 export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
@@ -52,6 +58,14 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
   const mountedRef = useRef(true)
   const cbRef      = useRef(callbacks)
   cbRef.current    = callbacks
+
+  // Refs para token/accountId — sempre actualizadas, evitam reabrir
+  // a ligação WS a cada render quando estes valores mudam.
+  const tokenRef     = useRef(callbacks.token ?? null)
+  const accountIdRef = useRef(callbacks.accountId ?? null)
+  const lastAuthSentRef = useRef<string>('')
+  tokenRef.current     = callbacks.token ?? null
+  accountIdRef.current = callbacks.accountId ?? null
 
   const [wsStatus, setWsStatus] = useState<WsStatus>('disconnected')
 
@@ -185,6 +199,17 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
       // list_bots é público no backend (não exige autenticação),
       // por isso pode ser pedido logo aqui em segurança.
       ws.send(JSON.stringify({ type: 'list_bots', payload: {} }))
+      // Se já temos token/conta (ex: utilizador já tinha sessão Deriv
+      // activa antes desta ligação WS abrir), autentica imediatamente.
+      // Sem isto, qualquer acção de bot falha com "Not authenticated".
+      if (tokenRef.current && accountIdRef.current) {
+        const authKey = `${tokenRef.current}:${accountIdRef.current}`
+        lastAuthSentRef.current = authKey
+        ws.send(JSON.stringify({
+          type: 'auth',
+          payload: { token: tokenRef.current, accountId: accountIdRef.current },
+        }))
+      }
       // Keepalive 25s
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN)
@@ -220,6 +245,27 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
       wsRef.current?.close()
     }
   }, [connect])
+
+  // ── (Re)autenticar quando token/accountId chegam ou mudam ────
+  // Cobre dois casos que o onopen por si só não cobre:
+  //   1) login termina DEPOIS da ligação WS já estar aberta
+  //   2) utilizador troca de conta (accountId muda) com o socket já ligado
+  // Sem isto, a sessão fica para sempre "Not authenticated" se o
+  // token só chegar depois do socket abrir.
+  useEffect(() => {
+    const token     = callbacks.token ?? null
+    const accountId = callbacks.accountId ?? null
+    if (!token || !accountId) return
+
+    const authKey = `${token}:${accountId}`
+    if (lastAuthSentRef.current === authKey) return // já autenticado com estas credenciais
+
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return // o onopen trata deste caso
+
+    lastAuthSentRef.current = authKey
+    ws.send(JSON.stringify({ type: 'auth', payload: { token, accountId } }))
+  }, [callbacks.token, callbacks.accountId])
 
   // ── API pública ───────────────────────────────────────────────
   return {
