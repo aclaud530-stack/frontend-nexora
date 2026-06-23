@@ -209,6 +209,7 @@ export function ControlsSection() {
     wsStatus,
     isLoadingCatalog,
     lastError,
+    statusMessage,
     listCatalogBots,
     startCatalogBot,
     stopBot,
@@ -349,6 +350,16 @@ export function ControlsSection() {
         {lastError && (
           <div className="px-3 py-2 rounded-lg bg-[#ef4444]/10 border border-[#ef4444]/20 text-[#ef4444] text-xs">
             ⚠ {lastError}
+          </div>
+        )}
+
+        {statusMessage && (
+          <div className={`px-3 py-2 rounded-lg text-xs border ${
+            statusMessage.kind === 'success' ? 'bg-[#22c55e]/10 border-[#22c55e]/20 text-[#22c55e]'
+            : statusMessage.kind === 'warning' ? 'bg-[#f59e0b]/10 border-[#f59e0b]/20 text-[#f59e0b]'
+            : 'bg-[#ef4444]/10 border-[#ef4444]/20 text-[#ef4444]'
+          }`}>
+            {statusMessage.text}
           </div>
         )}
 
