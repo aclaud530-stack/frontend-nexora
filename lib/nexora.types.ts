@@ -19,6 +19,8 @@ export type BotEventType =
   | 'bot:trade_closed'
   | 'bot:stats_updated'
   | 'bot:log'
+  | 'bot:goal_reached'
+  | 'bot:insufficient_balance'
 
 export interface BotEvent {
   type:    BotEventType
@@ -81,10 +83,13 @@ export interface BotState extends BotSummary {
 
 // ─── Payloads dos eventos emitidos pelo BaseStrategy ─────────
 export interface TradeClosedPayload {
-  contractId: string
-  profit:     number
-  won:        boolean
-  stake:      number
+  contractId:   string
+  profit:       number
+  won:          boolean
+  stake:        number
+  entryTick?:   number
+  exitTick?:    number
+  contractType?: string
 }
 
 export interface TradeOpenedPayload {
