@@ -2,33 +2,7 @@
 
 import { useTrading } from '@/lib/trading-context'
 import { useBots } from '@/lib/bots-context'
-import { useEffect, useState, useRef, useMemo } from 'react'
-
-// ── Animação de número com easing cúbico ──────────────────────────────────────
-
-function easeOutCubic(t: number) { return 1 - Math.pow(1 - t, 3) }
-
-function useAnimatedNumber(target: number, duration = 650) {
-  const [value, setValue] = useState(target)
-  const frameRef = useRef<number | null>(null)
-  const startRef = useRef<{ from: number; time: number } | null>(null)
-
-  useEffect(() => {
-    const from = value
-    startRef.current = { from, time: performance.now() }
-    const animate = (now: number) => {
-      if (!startRef.current) return
-      const t = Math.min((now - startRef.current.time) / duration, 1)
-      setValue(startRef.current.from + (target - startRef.current.from) * easeOutCubic(t))
-      if (t < 1) frameRef.current = requestAnimationFrame(animate)
-    }
-    if (frameRef.current) cancelAnimationFrame(frameRef.current)
-    frameRef.current = requestAnimationFrame(animate)
-    return () => { if (frameRef.current) cancelAnimationFrame(frameRef.current) }
-  }, [target]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  return value
-}
+import { useMemo } from 'react'
 
 // ── BalanceCard ───────────────────────────────────────────────────────────────
 
@@ -47,9 +21,6 @@ export function BalanceCard() {
       totalLosses: active.reduce((s, b) => s + b.stats.losses,  0),
     }
   }, [sessionBots])
-
-  const displayBalance = useAnimatedNumber(balance, 700)
-  const displayProfit  = useAnimatedNumber(netPnL,  700)
 
   const isProfit = netPnL >= 0
 
@@ -80,7 +51,7 @@ export function BalanceCard() {
           </div>
           <p className="text-white text-xl sm:text-2xl font-bold tracking-tight tabular-nums">
             <span className="text-gray-500 text-base">$</span>{' '}
-            {displayBalance.toFixed(2)}{' '}
+            {balance.toFixed(2)}{' '}
             <span className="text-sm font-normal text-gray-500">{currency}</span>
           </p>
         </div>
@@ -88,11 +59,11 @@ export function BalanceCard() {
         {/* Lucro/Prejuízo — vem dos bots reais em tempo real */}
         <div className="flex-1 p-4 bg-[#1a1f2e] flex flex-col justify-between">
           <p className="text-gray-400 text-xs mb-2 font-medium">Lucro/Prejuízo</p>
-          <p className={`text-xl sm:text-2xl font-bold tracking-tight tabular-nums transition-colors duration-500 ${isProfit ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+          <p className={`text-xl sm:text-2xl font-bold tracking-tight tabular-nums ${isProfit ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
             <span className="text-base opacity-70">$</span>{' '}
             {/* Prejuízo com sinal menos, lucro sem sinal */}
             {netPnL < 0 ? '-' : ''}
-            {Math.abs(displayProfit).toFixed(2)}
+            {Math.abs(netPnL).toFixed(2)}
           </p>
 
           {/* W / L em tempo real */}
