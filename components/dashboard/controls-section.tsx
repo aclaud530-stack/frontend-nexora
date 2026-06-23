@@ -440,10 +440,10 @@ export function ControlsSection() {
                     : 'border-[#22c55e] bg-[#22c55e]/10 hover:bg-[#22c55e]/20'
             }`}>
             {isRunning
-              ? <svg width="18" height="18" viewBox="0 0 24 24" fill="#dc2626"><path d="M6 4l14 8-14 8V4z" /></svg>
+              ? <span className="text-[#dc2626]"><Ico.Pause /></span>
               : isPaused
                 ? <svg width="18" height="18" viewBox="0 0 24 24" fill="#f59e0b"><path d="M6 4l14 8-14 8V4z" /></svg>
-                : <span className="text-[#22c55e]"><Ico.Pause /></span>
+                : <svg width="18" height="18" viewBox="0 0 24 24" fill="#22c55e"><path d="M6 4l14 8-14 8V4z" /></svg>
             }
           </button>
 
