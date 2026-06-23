@@ -222,11 +222,7 @@ export function ControlsSection() {
   const [selectedBot,   setSelectedBot]   = useState<CatalogBot | null>(null)
   const [pendingConfig, setPendingConfig] = useState<Partial<BotConfig> | null>(null)
   const [animProgress,  setAnimProgress]  = useState(0)
-  const [progressStep,  setProgressStep]  = useState(-1)
 
-  // ── FIX 1: sessionBotId guardado TAMBÉM em ref para leitura síncrona
-  // O estado React actualiza assincronamente — a ref garante que handleToggle
-  // vê sempre o valor mais recente sem esperar pelo próximo render.
   const [sessionBotId, setSessionBotId] = useState<string | null>(null)
   const sessionBotIdRef = useRef<string | null>(null)
   const setSessionBotIdSync = (id: string | null) => {
@@ -234,16 +230,10 @@ export function ControlsSection() {
     setSessionBotId(id)
   }
 
-  // ── FIX 2: prevOpenCount como useRef (não useState)
-  // useState dentro de useEffect causava re-renders infinitos e leituras stale.
-  const prevOpenCountRef = useRef<number>(0)
-
-  // Pré-seleccionar primeiro bot do catálogo
   useEffect(() => {
     if (!selectedBot && catalogBots.length > 0) setSelectedBot(catalogBots[0])
   }, [catalogBots, selectedBot])
 
-  // Sincronizar sessionBotId com o bot activo da sessão
   useEffect(() => {
     const running = sessionBots.find(b => b.status === 'running' || b.status === 'paused')
     if (running && !sessionBotIdRef.current) {
@@ -257,45 +247,51 @@ export function ControlsSection() {
     }
   }, [sessionBots])
 
-  // Bot activo lido de sessionBots (fonte de verdade)
   const liveBot   = sessionBotId ? sessionBots.find(b => b.id === sessionBotId) ?? null : null
   const isRunning = liveBot?.status === 'running'
   const isPaused  = liveBot?.status === 'paused'
 
-  // ── Barra de progresso derivada de openTrades ─────────────────────────────
-  // Passo 0 → analyzing (bot running, sem contrato aberto)
-  // Passo 1 → contract_open (contrato aberto para este bot)
-  // Passo 2 → contract_closed (flash de 1.2s quando contrato fecha)
+  // ── Barra de progresso ──────────────────────────────────────────
+  // Derivada directamente do estado em cada render — sem depender de
+  // refs/efeitos encadeados, para evitar a barra ficar "presa".
+  //   Passo 0 → Analisando   (bot a correr, sem contrato aberto)
+  //   Passo 1 → Contrato aberto (há ≥1 trade aberto deste bot)
+  //   Passo 2 → Contrato fechado (flash breve após o contrato fechar)
+  const openCountForBot = sessionBotId
+    ? Object.values(openTrades).filter(t => t.botId === sessionBotId).length
+    : 0
+  const closedCountForBot = sessionBotId
+    ? (trades.filter(t => t.botId === sessionBotId).length)
+    : 0
+
+  const [flashClosed, setFlashClosed] = useState(false)
+  const prevClosedCountRef = useRef<number>(0)
+
   useEffect(() => {
-    if (!isRunning) {
-      setProgressStep(-1)
-      prevOpenCountRef.current = 0
-      return
-    }
-
-    const count = sessionBotId
-      ? Object.values(openTrades).filter(t => t.botId === sessionBotId).length
-      : 0
-    const prev = prevOpenCountRef.current
-    prevOpenCountRef.current = count
-
-    if (count > 0) {
-      // Há contrato aberto
-      setProgressStep(1)
-    } else if (prev > 0 && count === 0) {
-      // Contrato acabou de fechar — flash breve no passo 2
-      setProgressStep(2)
-      const timer = setTimeout(() => setProgressStep(0), 1200)
+    const prev = prevClosedCountRef.current
+    prevClosedCountRef.current = closedCountForBot
+    if (closedCountForBot > prev && prev !== 0) {
+      // Um contrato deste bot acabou de fechar — flash breve
+      setFlashClosed(true)
+      const timer = setTimeout(() => setFlashClosed(false), 1200)
       return () => clearTimeout(timer)
-    } else {
-      // Sem contrato — a analisar
-      setProgressStep(0)
     }
-  }, [isRunning, openTrades, sessionBotId])
+    if (closedCountForBot > 0 && prev === 0) {
+      // Primeira vez a sincronizar a contagem (montagem/troca de bot) — não disparar flash
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closedCountForBot])
+
+  const progressStep = !isRunning
+    ? -1
+    : flashClosed
+      ? 2
+      : openCountForBot > 0
+        ? 1
+        : 0
 
   const steps = ['Analisando', 'Contrato aberto', 'Contrato fechado']
 
-  // Animar barra suavemente
   useEffect(() => {
     const target = isRunning && progressStep >= 0
       ? ((progressStep + 1) / steps.length) * 100
@@ -309,9 +305,6 @@ export function ControlsSection() {
     return () => clearInterval(id)
   }, [isRunning, progressStep, steps.length])
 
-  // ── FIX 3: Lucro/Prejuízo derivado dos trades reais ──────────────────────
-  // Calculado directamente dos trades do bots-context (mesma fonte que a tabela).
-  // Assim garante-se que o valor exibido aqui é idêntico ao da tabela.
   const { netPnL, totalWins, totalLosses } = useMemo(() => {
     const active = sessionBots.filter(b => b.stats.totalTrades > 0 || b.status === 'running')
     return {
@@ -321,8 +314,6 @@ export function ControlsSection() {
     }
   }, [sessionBots])
 
-  // ── Botão Play/Stop ───────────────────────────────────────────────────────
-  // FIX: usa sessionBotIdRef.current (síncrono) em vez de sessionBotId (estado async)
   const handleToggle = () => {
     if (!selectedBot) return
 
@@ -337,7 +328,6 @@ export function ControlsSection() {
       resumeBot(currentId!)
       return
     }
-    // Iniciar novo bot
     startCatalogBot(selectedBot.id, undefined, pendingConfig ?? undefined)
   }
 
@@ -364,7 +354,6 @@ export function ControlsSection() {
 
         <div className="grid grid-cols-3 gap-3">
 
-          {/* Conta */}
           <div className="relative">
             <p className="text-gray-400 text-xs mb-2 font-medium">Tipo de Conta</p>
             <button onClick={() => setShowAccDrop(!showAccDrop)}
@@ -385,7 +374,6 @@ export function ControlsSection() {
             )}
           </div>
 
-          {/* Estratégia */}
           <div className="relative">
             <div className="flex items-center justify-between mb-2">
               <p className="text-gray-400 text-xs font-medium">Estratégia</p>
@@ -421,7 +409,6 @@ export function ControlsSection() {
             )}
           </div>
 
-          {/* Vídeo Aula */}
           <div>
             <p className="text-gray-400 text-xs mb-2 font-medium">Vídeo Aula</p>
             <button className="w-full bg-[#dc2626] hover:bg-[#b91c1c] rounded-xl px-3 py-3 flex items-center justify-center gap-2 transition-all">
@@ -430,7 +417,6 @@ export function ControlsSection() {
           </div>
         </div>
 
-        {/* Engrenagem + Play/Stop + Barra */}
         <div className="flex items-center gap-4">
           <button
             onClick={() => selectedBot && setShowConfig(true)}
@@ -454,10 +440,10 @@ export function ControlsSection() {
                     : 'border-[#22c55e] bg-[#22c55e]/10 hover:bg-[#22c55e]/20'
             }`}>
             {isRunning
-              ? <span className="text-[#dc2626]"><Ico.Pause /></span>
+              ? <svg width="18" height="18" viewBox="0 0 24 24" fill="#dc2626"><path d="M6 4l14 8-14 8V4z" /></svg>
               : isPaused
                 ? <svg width="18" height="18" viewBox="0 0 24 24" fill="#f59e0b"><path d="M6 4l14 8-14 8V4z" /></svg>
-                : <svg width="18" height="18" viewBox="0 0 24 24" fill="#22c55e"><path d="M6 4l14 8-14 8V4z" /></svg>
+                : <span className="text-[#22c55e]"><Ico.Pause /></span>
             }
           </button>
 
@@ -479,13 +465,11 @@ export function ControlsSection() {
           </div>
         </div>
 
-        {/* Lucro/Prejuízo em tempo real — alimentado pelos trades reais */}
         {(sessionBots.some(b => b.stats.totalTrades > 0 || b.status === 'running')) && (
           <div className="flex items-center gap-4 px-3 py-2.5 rounded-xl bg-[#1a2235] border border-[#2a3142]">
             <div>
               <p className="text-gray-500 text-[10px]">Lucro/Prejuízo</p>
               <p className={`text-base font-bold font-mono tabular-nums ${netPnL >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
-                {/* Prejuízo com sinal menos, lucro sem sinal */}
                 {netPnL < 0 ? '-' : ''}${Math.abs(netPnL).toFixed(2)}
               </p>
             </div>
