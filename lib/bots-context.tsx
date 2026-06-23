@@ -16,19 +16,22 @@ import { useNexoraWs, WsStatus, CatalogBot } from './use-nexora-ws'
 import { useAuth } from './auth-context'
 
 // ─── TradeRecord para a UI ────────────────────────────────────
+// Campos alinhados com a tabela simplificada: Hora | Tipo | Tick Final | Preço | Resultado
 
 export interface TradeRecord {
-  id:         string
-  hora:       string
-  botId:      string
-  botName:    string
-  strategy:   string
-  stake:      number
-  profit:     number
-  won:        boolean
-  timestamp:  number
-  pending?:   boolean
-  direction?: string
+  id:           string
+  hora:         string
+  botId:        string
+  botName:      string
+  strategy:     string
+  stake:        number       // coluna "Preço" (valor apostado)
+  profit:       number       // coluna "Resultado"
+  won:          boolean
+  timestamp:    number
+  pending?:     boolean
+  direction?:   string
+  contractType?: string      // coluna "Tipo" (ex: CALL, PUT, DIGITOVER)
+  exitTick?:    number       // coluna "Tick Final"
 }
 
 // ─── Contexto ─────────────────────────────────────────────────
@@ -45,6 +48,8 @@ interface BotsCtx {
   // Estado geral
   wsStatus:       WsStatus
   lastError:      string | null
+  // Mensagem de evento (meta atingida, stop de perda, saldo insuficiente)
+  statusMessage:  { text: string; kind: 'success' | 'warning' | 'error' } | null
 
   // Histórico de trades
   trades:         TradeRecord[]
@@ -130,6 +135,10 @@ export function BotsProvider({ children }: { children: ReactNode }) {
 
   const [lastError,       setLastError]       = useState<string | null>(null)
 
+  // Mensagem de estado (meta atingida, stop de perda, saldo insuficiente)
+  // Separada do lastError para a UI poder estilizar diferente (success/warning/error).
+  const [statusMessage, setStatusMessage] = useState<{ text: string; kind: 'success' | 'warning' | 'error' } | null>(null)
+
   // Ref síncrona para lookup de nome/strategy por botId
   const sessionBotsRef = useRef<BotSummary[]>([])
 
@@ -149,6 +158,11 @@ export function BotsProvider({ children }: { children: ReactNode }) {
   const showError = useCallback((msg: string) => {
     setLastError(msg)
     setTimeout(() => setLastError(null), 6000)
+  }, [])
+
+  const showStatusMessage = useCallback((text: string, kind: 'success' | 'warning' | 'error') => {
+    setStatusMessage({ text, kind })
+    setTimeout(() => setStatusMessage(null), 8000)
   }, [])
 
   // ── Catálogo carregado ────────────────────────────────────────
@@ -255,6 +269,7 @@ export function BotsProvider({ children }: { children: ReactNode }) {
           botId, botName: name, strategy,
           stake: p.stake, profit: p.profit, won: p.won,
           timestamp: Date.now(), pending: false,
+          contractType: p.contractType, exitTick: p.exitTick,
         }
         setOpenTrades(prev => { const n = { ...prev }; delete n[p.contractId]; return n })
         setTrades(prev => [rec, ...prev].slice(0, MAX_TRADES))
@@ -274,8 +289,28 @@ export function BotsProvider({ children }: { children: ReactNode }) {
         }))
         break
       }
+
+      // ── Bot parou automaticamente: meta atingida, stop de perda,
+      // ou limite de trades. Mostra uma mensagem clara e específica.
+      case 'bot:goal_reached': {
+        const p = payload as { reason?: string; maxProfit?: number; maxLoss?: number; maxTrades?: number }
+        const { name } = getBotMeta(botId)
+        let msg = `${name}: parado automaticamente.`
+        if (p.reason === 'max_profit_reached') msg = `🎯 ${name}: Meta de lucro atingida! ($${p.maxProfit?.toFixed(2)})`
+        else if (p.reason === 'max_loss_reached') msg = `🛑 ${name}: Stop de perda atingido. ($${p.maxLoss?.toFixed(2)})`
+        else if (p.reason === 'max_trades_reached') msg = `✅ ${name}: Limite de ${p.maxTrades} trades atingido.`
+        showStatusMessage(msg, p.reason === 'max_profit_reached' ? 'success' : 'warning')
+        break
+      }
+
+      // ── Saldo insuficiente para abrir um contrato — bot para a seguir.
+      case 'bot:insufficient_balance': {
+        const { name } = getBotMeta(botId)
+        showStatusMessage(`💰 ${name}: Saldo insuficiente para abrir um novo contrato. Bot parado.`, 'error')
+        break
+      }
     }
-  }, [patchSessionBot, showError])
+  }, [patchSessionBot, showError, showStatusMessage])
 
   const ws = useNexoraWs({
     onCatalogLoaded:     handleCatalogLoaded,
@@ -306,6 +341,7 @@ export function BotsProvider({ children }: { children: ReactNode }) {
       // Estado
       wsStatus: ws.wsStatus,
       lastError,
+      statusMessage,
 
       // Trades / logs
       trades,
