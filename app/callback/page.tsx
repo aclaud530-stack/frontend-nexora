@@ -3,11 +3,13 @@
 import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useLoader } from '@/components/loader'
+import { useAuth } from '@/lib/auth-context'
 
 function CallbackContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { show, complete, hide } = useLoader()
+  const { login } = useAuth()
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading')
   const [errorMessage, setErrorMessage] = useState('')
 
@@ -37,8 +39,20 @@ function CallbackContent() {
       return
     }
 
-    // Guardar token
-    localStorage.setItem('token', token)
+    // ── FIX: login() explícito em vez de só localStorage.setItem ──
+    // login() grava o token, busca as contas e popula currentAccount
+    // de forma síncrona aqui mesmo — antes de navegar para /dashboard.
+    // Isto elimina a race condition em que o BotsProvider/useNexoraWs
+    // monta com accountId ainda nulo e a ligação WS nunca autentica,
+    // obrigando o utilizador a recarregar a página para funcionar.
+    const ok = await login(token)
+
+    if (!ok) {
+      setStatus('error')
+      setErrorMessage('Não foi possível validar a conta. Tenta fazer login novamente.')
+      hide()
+      return
+    }
 
     // Limpar session storage
     sessionStorage.removeItem('pkce_code_verifier')
@@ -47,9 +61,10 @@ function CallbackContent() {
     setStatus('success')
     complete('Autenticação bem sucedida!')
 
-    setTimeout(() => {
-      router.push('/dashboard')
-    }, 800)
+    // Já não depende de um setTimeout arbitrário — accounts e
+    // currentAccount já estão garantidamente prontos neste ponto,
+    // por isso o dashboard monta já com tudo o que precisa.
+    router.push('/dashboard')
   }
 
   const handleRetry = () => {
