@@ -231,6 +231,12 @@ export function ControlsSection() {
     setSessionBotId(id)
   }
 
+  // Bloqueia novos pedidos de start enquanto um já está em curso —
+  // evita criar bots duplicados se o utilizador clicar Play várias
+  // vezes seguidas antes da resposta (bot_created) chegar.
+  const startInFlightRef = useRef(false)
+  const [isStarting, setIsStarting] = useState(false)
+
   useEffect(() => {
     if (!selectedBot && catalogBots.length > 0) setSelectedBot(catalogBots[0])
   }, [catalogBots, selectedBot])
@@ -239,6 +245,8 @@ export function ControlsSection() {
     const running = sessionBots.find(b => b.status === 'running' || b.status === 'paused')
     if (running && !sessionBotIdRef.current) {
       setSessionBotIdSync(running.id)
+      startInFlightRef.current = false
+      setIsStarting(false)
     }
     if (sessionBotIdRef.current) {
       const tracked = sessionBots.find(b => b.id === sessionBotIdRef.current)
@@ -329,7 +337,16 @@ export function ControlsSection() {
       resumeBot(currentId!)
       return
     }
+    // Proteção contra cliques múltiplos: ignora novos pedidos de start
+    // enquanto o anterior ainda não recebeu resposta do backend.
+    if (startInFlightRef.current) return
+    startInFlightRef.current = true
+    setIsStarting(true)
     startCatalogBot(selectedBot.id, undefined, pendingConfig ?? undefined)
+
+    // Rede de segurança: liberta o lock mesmo que a resposta nunca
+    // chegue (ex: erro silencioso), para não bloquear o botão para sempre.
+    setTimeout(() => { startInFlightRef.current = false; setIsStarting(false) }, 8000)
   }
 
   const handleAccSelect = async (acc: typeof accounts[number]) => {
@@ -440,9 +457,10 @@ export function ControlsSection() {
 
           <button
             onClick={handleToggle}
-            disabled={!selectedBot || wsStatus !== 'connected'}
+            disabled={!selectedBot || wsStatus !== 'connected' || isStarting}
+            title={isStarting ? 'A iniciar…' : undefined}
             className={`w-12 h-12 rounded-xl flex items-center justify-center border-2 transition-all shrink-0 ${
-              !selectedBot || wsStatus !== 'connected'
+              !selectedBot || wsStatus !== 'connected' || isStarting
                 ? 'opacity-40 cursor-not-allowed border-gray-700 bg-transparent'
                 : isRunning
                   ? 'border-[#dc2626] bg-[#dc2626]/10 hover:bg-[#dc2626]/20'
@@ -450,11 +468,13 @@ export function ControlsSection() {
                     ? 'border-[#f59e0b] bg-[#f59e0b]/10 hover:bg-[#f59e0b]/20'
                     : 'border-[#22c55e] bg-[#22c55e]/10 hover:bg-[#22c55e]/20'
             }`}>
-            {isRunning
-              ? <span className="text-[#dc2626]"><Ico.Pause /></span>
-              : isPaused
-                ? <svg width="18" height="18" viewBox="0 0 24 24" fill="#f59e0b"><path d="M6 4l14 8-14 8V4z" /></svg>
-                : <svg width="18" height="18" viewBox="0 0 24 24" fill="#22c55e"><path d="M6 4l14 8-14 8V4z" /></svg>
+            {isStarting
+              ? <span className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+              : isRunning
+                ? <span className="text-[#dc2626]"><Ico.Pause /></span>
+                : isPaused
+                  ? <svg width="18" height="18" viewBox="0 0 24 24" fill="#f59e0b"><path d="M6 4l14 8-14 8V4z" /></svg>
+                  : <svg width="18" height="18" viewBox="0 0 24 24" fill="#22c55e"><path d="M6 4l14 8-14 8V4z" /></svg>
             }
           </button>
 
