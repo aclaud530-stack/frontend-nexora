@@ -73,6 +73,12 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
   // Credenciais que já falharam autenticação no backend — nunca
   // reenviadas automaticamente, mesmo que o WS reconecte.
   const failedAuthKeyRef = useRef<string>('')
+  // Timestamp da última mensagem recebida (qualquer tipo, incluindo
+  // pong) — usado pelo watchdog para detectar ligações "zombie":
+  // readyState continua OPEN mas o socket já não responde de facto
+  // (comum em mobile após standby longo / mudança de rede).
+  const lastMessageAtRef = useRef<number>(Date.now())
+  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null)
   tokenRef.current     = callbacks.token ?? null
   accountIdRef.current = callbacks.accountId ?? null
 
@@ -237,14 +243,32 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
           }))
         }
       }
-      // Keepalive 25s
+      // Keepalive 15s — mais frequente do que antes (25s) para
+      // detectar ligações mortas mais rápido sob carga.
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN)
           ws.send(JSON.stringify({ type: 'ping', payload: {} }))
-      }, 25_000)
+      }, 15_000)
+
+      // Watchdog: se não chegar NENHUMA mensagem (nem pong) durante
+      // 40s seguidos, a ligação está "zombie" — o readyState reporta
+      // OPEN mas o socket já não está realmente vivo. Força o fecho
+      // para disparar o ciclo normal de reconexão em vez de ficar
+      // preso numa ligação morta indefinidamente.
+      lastMessageAtRef.current = Date.now()
+      if (watchdogRef.current) clearInterval(watchdogRef.current)
+      watchdogRef.current = setInterval(() => {
+        if (Date.now() - lastMessageAtRef.current > 40_000) {
+          console.warn('[NexoraWS] Ligação sem resposta há 40s — a forçar reconexão')
+          ws.close()
+        }
+      }, 10_000)
     }
 
-    ws.onmessage = (e) => handleMessage(e.data)
+    ws.onmessage = (e) => {
+      lastMessageAtRef.current = Date.now()
+      handleMessage(e.data)
+    }
 
     ws.onerror = () => {
       if (!mountedRef.current) return
@@ -255,7 +279,8 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
     ws.onclose = () => {
       if (!mountedRef.current) return
       setWsStatus('disconnected')
-      if (pingRef.current) { clearInterval(pingRef.current); pingRef.current = null }
+      if (pingRef.current)     { clearInterval(pingRef.current);     pingRef.current = null }
+      if (watchdogRef.current) { clearInterval(watchdogRef.current); watchdogRef.current = null }
       const delay = Math.min(1000 * 2 ** attemptRef.current, 30_000)
       attemptRef.current += 1
       reconnRef.current = setTimeout(connect, delay)
@@ -267,9 +292,44 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
     connect()
     return () => {
       mountedRef.current = false
-      if (pingRef.current)   clearInterval(pingRef.current)
-      if (reconnRef.current) clearTimeout(reconnRef.current)
+      if (pingRef.current)     clearInterval(pingRef.current)
+      if (watchdogRef.current) clearInterval(watchdogRef.current)
+      if (reconnRef.current)   clearTimeout(reconnRef.current)
       wsRef.current?.close()
+    }
+  }, [connect])
+
+  // ── Reconexão imediata ao voltar a ficar visível/online ──────
+  // Browsers (especialmente mobile) suspendem ou fecham ligações WS
+  // quando a aba é minimizada/em background. Sem isto, ao voltar à
+  // app o utilizador ficaria à espera do backoff exponencial (até
+  // 30s) antes de reconectar. Aqui forçamos reconexão imediata e
+  // resetamos o backoff, para a app "voltar rápido" como esperado.
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+
+    const tryFastReconnect = () => {
+      if (!mountedRef.current) return
+      if (wsRef.current?.readyState === WebSocket.OPEN) return
+      // Reset do backoff — não queremos herdar um delay longo de
+      // tentativas anteriores só porque a aba esteve em background.
+      attemptRef.current = 0
+      if (reconnRef.current) { clearTimeout(reconnRef.current); reconnRef.current = null }
+      connect()
+    }
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tryFastReconnect()
+    }
+
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('online', tryFastReconnect)
+    window.addEventListener('focus', tryFastReconnect)
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('online', tryFastReconnect)
+      window.removeEventListener('focus', tryFastReconnect)
     }
   }, [connect])
 
