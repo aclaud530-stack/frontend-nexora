@@ -55,8 +55,28 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen min-h-dvh flex items-center justify-center bg-[#0a0e1a] p-4">
-      <div className="w-full max-w-[380px] bg-[#0d1117] rounded-2xl border border-[#1a1f2e] p-8 shadow-2xl">
+    <div className="relative min-h-screen min-h-dvh flex items-center justify-center bg-[#0a0e1a] p-4 overflow-hidden">
+
+      {/* Glow de fundo subtil — dá profundidade sem distrair */}
+      <div
+        className="absolute -top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[600px] rounded-full pointer-events-none"
+        style={{ background: 'radial-gradient(circle, rgba(46,199,255,0.12) 0%, transparent 70%)' }}
+      />
+      <div
+        className="absolute bottom-0 right-0 w-[400px] h-[400px] rounded-full pointer-events-none"
+        style={{ background: 'radial-gradient(circle, rgba(0,119,255,0.08) 0%, transparent 70%)' }}
+      />
+
+      {/* Cartão de login — efeito glass */}
+      <div
+        className="relative w-full max-w-[380px] rounded-2xl p-8 shadow-2xl"
+        style={{
+          background: 'rgba(13, 17, 23, 0.55)',
+          backdropFilter: 'blur(20px) saturate(140%)',
+          WebkitBackdropFilter: 'blur(20px) saturate(140%)',
+          border: '1px solid rgba(255, 255, 255, 0.08)',
+        }}
+      >
         <div className="text-center mb-8">
           <h1
             className="text-3xl font-black tracking-[4px] mb-2"
@@ -75,28 +95,25 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <hr className="border-[#1a1f2e] mb-6" />
+        <hr className="border-white/10 mb-6" />
 
         <p className="text-gray-400 text-sm text-center mb-6">
           Entre com sua conta Deriv para começar a negociar.
         </p>
 
+        {/* Botão principal — acabamento sóbrio, sem brilho exagerado */}
         <button
           onClick={handleLogin}
           disabled={isLoading}
-          className="w-full py-3 px-4 rounded-xl font-semibold text-white transition-all duration-200 disabled:opacity-50 hover:scale-[1.02] active:scale-[0.98]"
-          style={{
-            background: 'linear-gradient(135deg, #0077ff, #2ec7ff)',
-            boxShadow: '0 4px 20px rgba(46, 199, 255, 0.3)',
-          }}
+          className="w-full py-3 px-4 rounded-xl font-semibold text-white text-sm transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed border border-[#2ec7ff]/30 bg-[#0f1c2e] hover:bg-[#13233a] active:bg-[#0c1828]"
         >
           {isLoading ? 'A carregar...' : 'Entrar com Deriv'}
         </button>
 
         <div className="flex items-center gap-4 my-6">
-          <span className="flex-1 h-px bg-[#1a1f2e]" />
+          <span className="flex-1 h-px bg-white/10" />
           <p className="text-gray-500 text-xs">Não tem conta?</p>
-          <span className="flex-1 h-px bg-[#1a1f2e]" />
+          <span className="flex-1 h-px bg-white/10" />
         </div>
 
         <div className="text-center">
@@ -108,7 +125,7 @@ export default function LoginPage() {
           </button>
         </div>
 
-        <div className="mt-8 pt-6 border-t border-[#1a1f2e] text-center">
+        <div className="mt-8 pt-6 border-t border-white/10 text-center">
           <p className="text-gray-600 text-xs mb-2">
             © 2026 Nexora Forex · Powered by Deriv API
           </p>
