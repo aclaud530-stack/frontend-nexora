@@ -41,6 +41,12 @@ interface NexoraWsCallbacks {
   onBotLogs?:          (botId: string, logs: BotLogEntry[]) => void
   // Erros
   onError?:            (msg: string) => void
+  // Autenticação falhou de forma definitiva (token inválido/expirado
+  // na Deriv, ex: erro AUTH_FAILED do backend). Diferente de onError:
+  // sinaliza que a app deve parar de tentar reautenticar automaticamente
+  // com as mesmas credenciais — sem isto, cada reconexão WS volta a
+  // tentar o mesmo token inválido, martelando o backend num loop.
+  onAuthFailed?:       () => void
   // Token OAuth da Deriv (de useAuth/localStorage) e conta activa —
   // necessários para autenticar a sessão no backend Nexora. Sem isto,
   // o backend nunca chama session.authenticated = true e qualquer
@@ -64,6 +70,9 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
   const tokenRef     = useRef(callbacks.token ?? null)
   const accountIdRef = useRef(callbacks.accountId ?? null)
   const lastAuthSentRef = useRef<string>('')
+  // Credenciais que já falharam autenticação no backend — nunca
+  // reenviadas automaticamente, mesmo que o WS reconecte.
+  const failedAuthKeyRef = useRef<string>('')
   tokenRef.current     = callbacks.token ?? null
   accountIdRef.current = callbacks.accountId ?? null
 
@@ -160,6 +169,19 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
                          : typeof rootMsg?.message === 'string' ? rootMsg.message
                          : typeof rootMsg?.error   === 'string' ? rootMsg.error
                          : 'Erro desconhecido'
+
+            const code = typeof p?.code === 'string' ? p.code
+                       : typeof rootMsg?.code === 'string' ? rootMsg.code
+                       : undefined
+
+            // Token inválido/expirado: marca estas credenciais como
+            // falhadas para não as reenviar a cada reconexão, e avisa
+            // a app para levar o utilizador de volta ao login.
+            if (code === 'AUTH_FAILED' || code === 'MISSING_TOKEN' || code === 'NO_ACCOUNTS' || code === 'OTP_FAILED') {
+              failedAuthKeyRef.current = `${tokenRef.current}:${accountIdRef.current}`
+              cbRef.current.onAuthFailed?.()
+            }
+
             cbRef.current.onError?.(errMsg as string)
             break
           }
@@ -202,13 +224,18 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
       // Se já temos token/conta (ex: utilizador já tinha sessão Deriv
       // activa antes desta ligação WS abrir), autentica imediatamente.
       // Sem isto, qualquer acção de bot falha com "Not authenticated".
+      // Exceção: se estas credenciais já falharam autenticação antes,
+      // não tentamos de novo — evita martelar o backend num loop com
+      // um token sabidamente inválido/expirado a cada reconexão.
       if (tokenRef.current && accountIdRef.current) {
         const authKey = `${tokenRef.current}:${accountIdRef.current}`
-        lastAuthSentRef.current = authKey
-        ws.send(JSON.stringify({
-          type: 'auth',
-          payload: { token: tokenRef.current, accountId: accountIdRef.current },
-        }))
+        if (authKey !== failedAuthKeyRef.current) {
+          lastAuthSentRef.current = authKey
+          ws.send(JSON.stringify({
+            type: 'auth',
+            payload: { token: tokenRef.current, accountId: accountIdRef.current },
+          }))
+        }
       }
       // Keepalive 25s
       pingRef.current = setInterval(() => {
@@ -259,6 +286,7 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
 
     const authKey = `${token}:${accountId}`
     if (lastAuthSentRef.current === authKey) return // já autenticado com estas credenciais
+    if (failedAuthKeyRef.current === authKey) return // já sabemos que estas credenciais falham
 
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return // o onopen trata deste caso
