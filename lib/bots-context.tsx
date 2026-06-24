@@ -312,6 +312,17 @@ export function BotsProvider({ children }: { children: ReactNode }) {
     }
   }, [patchSessionBot, showError, showStatusMessage])
 
+  // Token inválido/expirado confirmado pelo backend: limpa a sessão
+  // local e leva o utilizador de volta ao login, em vez de continuar
+  // a martelar o backend com o mesmo token a cada reconexão WS.
+  const handleAuthFailed = useCallback(() => {
+    if (typeof window === 'undefined') return
+    showError('Sessão expirada — por favor inicia sessão novamente.')
+    localStorage.removeItem('token')
+    localStorage.removeItem('currentAccountId')
+    setTimeout(() => { window.location.href = '/' }, 1500)
+  }, [showError])
+
   const ws = useNexoraWs({
     onCatalogLoaded:     handleCatalogLoaded,
     onSessionBotsLoaded: handleSessionBotsLoaded,
@@ -319,6 +330,7 @@ export function BotsProvider({ children }: { children: ReactNode }) {
     onBotEvent:          handleBotEvent,
     onBotLogs:           handleBotLogs,
     onError:             showError,
+    onAuthFailed:        handleAuthFailed,
     token,
     accountId,
   })
