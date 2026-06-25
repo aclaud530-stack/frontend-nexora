@@ -92,6 +92,13 @@ export default function MenuPage() {
   const [onlineCount, setOnlineCount] = useState<number | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
 
+  // Rótulos de exibição personalizáveis (Real/Demo) — só texto,
+  // nunca troca qual conta é realmente real ou demo.
+  const [realLabel, setRealLabel] = useState('Real')
+  const [demoLabel, setDemoLabel] = useState('Demo')
+  const [labelsSaving, setLabelsSaving] = useState(false)
+  const [labelsSavedMsg, setLabelsSavedMsg] = useState('')
+
   // Controla qual ecrã se mostra dentro deste mesmo ficheiro/componente
   // — 'menu' (normal) ou 'admin' (painel fullscreen). Sem rota própria,
   // sem ficheiro novo: tudo vive aqui.
@@ -101,6 +108,38 @@ export default function MenuPage() {
   const [termosOpen, setTermosOpen] = useState(false)
   const [termosTab, setTermosTab] = useState<'plataforma' | 'deriv'>('plataforma')
   const unreadAvisos = LOCAL_AVISOS.length
+
+  // Carrega os rótulos actuais sempre que o painel admin abre —
+  // assim reflecte o que está realmente guardado no backend (Redis),
+  // mesmo que tenha sido alterado noutro dispositivo.
+  useEffect(() => {
+    if (view !== 'admin') return
+    let cancelled = false
+    api.getAccountLabels().then(labels => {
+      if (cancelled) return
+      setRealLabel(labels.realLabel)
+      setDemoLabel(labels.demoLabel)
+    })
+    return () => { cancelled = true }
+  }, [view])
+
+  const handleSaveLabels = async () => {
+    if (!currentAccount) return
+    setLabelsSaving(true)
+    setLabelsSavedMsg('')
+    try {
+      const updated = await api.setAccountLabels(currentAccount.account_id, { realLabel, demoLabel })
+      setRealLabel(updated.realLabel)
+      setDemoLabel(updated.demoLabel)
+      setLabelsSavedMsg('Guardado!')
+    } catch (e) {
+      setLabelsSavedMsg(e instanceof Error ? e.message : 'Falha ao guardar.')
+    } finally {
+      setLabelsSaving(false)
+      setTimeout(() => setLabelsSavedMsg(''), 3000)
+    }
+  }
+
 
   useEffect(() => {
     let cancelled = false
@@ -294,6 +333,56 @@ export default function MenuPage() {
             </div>
 
           </div>
+
+          {/* ── Rótulos de exibição (Real/Demo) ─────────────────
+              Apenas texto de exibição. Nunca troca qual conta é
+              realmente real ou demo — isso continua sempre a vir
+              de is_virtual/account_type da Deriv, intocado. */}
+          <div className="mt-6 bg-[#0d1117] border border-[#1a1f2e] rounded-2xl p-6">
+            <h2 className="text-white font-semibold text-sm mb-1">Rótulos de exibição das contas</h2>
+            <p className="text-gray-500 text-xs mb-5 leading-relaxed">
+              Personaliza apenas o texto mostrado para cada tipo de conta
+              (ex: "Conta Ao Vivo" em vez de "Real"). Não altera qual conta
+              é realmente real ou demo.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-gray-400 text-xs mb-1.5">Rótulo da conta real</label>
+                <input
+                  type="text"
+                  value={realLabel}
+                  onChange={e => setRealLabel(e.target.value)}
+                  placeholder="Real"
+                  className="w-full bg-[#1a1f2e] border border-[#2a3142] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#2ec7ff]"
+                />
+              </div>
+              <div>
+                <label className="block text-gray-400 text-xs mb-1.5">Rótulo da conta demo</label>
+                <input
+                  type="text"
+                  value={demoLabel}
+                  onChange={e => setDemoLabel(e.target.value)}
+                  placeholder="Demo"
+                  className="w-full bg-[#1a1f2e] border border-[#2a3142] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#2ec7ff]"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 mt-5">
+              <button
+                onClick={handleSaveLabels}
+                disabled={labelsSaving}
+                className="px-5 py-2.5 rounded-xl bg-[#2ec7ff] text-[#0a0e1a] text-sm font-semibold hover:bg-[#5ad4ff] transition-colors disabled:opacity-50"
+              >
+                {labelsSaving ? 'A guardar...' : 'Guardar rótulos'}
+              </button>
+              {labelsSavedMsg && (
+                <span className="text-xs text-gray-400">{labelsSavedMsg}</span>
+              )}
+            </div>
+          </div>
+
         </div>
       </div>
     )
