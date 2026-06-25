@@ -107,8 +107,12 @@ export default function MenuPage() {
 
     const fetchOnlineCount = async () => {
       try {
-        const { count } = await api.getOnlineCount()
-        if (!cancelled) setOnlineCount(count)
+        const result = await api.getOnlineCount()
+        // Defesa extra: se o backend devolver algo inesperado (404,
+        // HTML de erro, payload sem "count"), nunca propaga undefined
+        // para o estado — isso é o que causava o crash em toLocaleString.
+        const count = typeof result?.count === 'number' ? result.count : null
+        if (!cancelled && count !== null) setOnlineCount(count)
       } catch {
         // Mantém o último valor conhecido em caso de falha pontual
         // da rede — não esconde nem inventa um número.
