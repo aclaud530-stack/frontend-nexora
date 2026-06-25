@@ -8,6 +8,7 @@ import { useLoader } from '@/components/loader'
 import { api } from '@/lib/api'
 import {
   X,
+  ArrowLeft,
   Globe,
   LayoutDashboard,
   Bot,
@@ -30,19 +31,10 @@ import {
 
 const WHATSAPP = '976289984'
 
-const ONLINE_DELTAS = [4, 6, 8, 1, 9]
-let deltaIndex = 0
-
-function generateOnlineCount() {
-  const base = 4890899
-  return base + Math.floor(Math.random() * 50000)
-}
-
-function nextDelta(): number {
-  const delta = ONLINE_DELTAS[deltaIndex % ONLINE_DELTAS.length]
-  deltaIndex++
-  return delta
-}
+// Intervalo de actualização da contagem de utilizadores online.
+// Pedido ao backend (/api/online-count), não simulado — reflecte
+// sessões realmente autenticadas neste momento.
+const ONLINE_POLL_INTERVAL_MS = 15_000
 
 const LOCAL_AVISOS = [
   {
@@ -93,8 +85,17 @@ export default function MenuPage() {
   const { currentAccount, logout } = useAuth()
   const { disconnect } = useTrading()
   const { show, complete, hide } = useLoader()
-  const [onlineCount, setOnlineCount] = useState(generateOnlineCount())
+
+  // Contagem real de utilizadores online — vinda do backend, nunca
+  // simulada. Começa em null para distinguir "ainda não carregou"
+  // de "0 utilizadores online" (ambos são estados válidos e diferentes).
+  const [onlineCount, setOnlineCount] = useState<number | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
+
+  // Controla qual ecrã se mostra dentro deste mesmo ficheiro/componente
+  // — 'menu' (normal) ou 'admin' (painel fullscreen). Sem rota própria,
+  // sem ficheiro novo: tudo vive aqui.
+  const [view, setView] = useState<'menu' | 'admin'>('menu')
   const [isLoading, setIsLoading] = useState(true)
   const [avisosOpen, setAvisosOpen] = useState(false)
   const [termosOpen, setTermosOpen] = useState(false)
@@ -102,12 +103,21 @@ export default function MenuPage() {
   const unreadAvisos = LOCAL_AVISOS.length
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      const delta = nextDelta()
-      const sign = Math.random() > 0.4 ? 1 : -1
-      setOnlineCount(prev => prev + sign * delta)
-    }, 60 * 1000)
-    return () => clearInterval(interval)
+    let cancelled = false
+
+    const fetchOnlineCount = async () => {
+      try {
+        const { count } = await api.getOnlineCount()
+        if (!cancelled) setOnlineCount(count)
+      } catch {
+        // Mantém o último valor conhecido em caso de falha pontual
+        // da rede — não esconde nem inventa um número.
+      }
+    }
+
+    fetchOnlineCount()
+    const interval = setInterval(fetchOnlineCount, ONLINE_POLL_INTERVAL_MS)
+    return () => { cancelled = true; clearInterval(interval) }
   }, [])
 
   useEffect(() => {
@@ -194,8 +204,98 @@ export default function MenuPage() {
     )
   }
 
+  // Protecção extra: se isAdmin deixar de ser verdadeiro enquanto a
+  // vista admin está aberta, volta automaticamente ao menu. Feito em
+  // efeito (não durante o render) para evitar o anti-padrão de
+  // actualizar estado a meio da renderização.
+  useEffect(() => {
+    if (view === 'admin' && !isAdmin) setView('menu')
+  }, [view, isAdmin])
+
   if (isLoading) return null
 
+  // ── Vista: Painel Admin (fullscreen, dentro do mesmo ficheiro) ──
+  // Protegido por isAdmin (já confirmado junto do backend em loadData()
+  // via api.checkAdmin).
+  if (view === 'admin' && isAdmin) {
+    return (
+      <div className="min-h-screen min-h-dvh bg-[#0a0e1a] text-white">
+
+        <div className="sticky top-0 z-10 bg-[#0a0e1a]/95 backdrop-blur-sm border-b border-[#1a1f2e]">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex items-center gap-4">
+            <button
+              onClick={() => setView('menu')}
+              className="p-2 rounded-full bg-[#1a1f2e] hover:bg-[#2a3142] transition-colors shrink-0"
+            >
+              <ArrowLeft size={18} />
+            </button>
+            <div className="flex items-center gap-2">
+              <ShieldCheck size={18} className="text-[#f59e0b]" />
+              <h1 className="text-lg sm:text-xl font-bold tracking-wide">Dashboard Admin</h1>
+            </div>
+          </div>
+        </div>
+
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
+
+          <p className="text-gray-500 text-sm mb-8">
+            Visão geral da plataforma — dados em tempo real do backend.
+          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
+
+            {/* Online — dado real, mesma fonte do contador do menu */}
+            <div className="bg-[#0d1117] border border-[#1a1f2e] rounded-2xl p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="w-9 h-9 rounded-xl bg-[#22c55e]/10 flex items-center justify-center">
+                  <Globe size={18} className="text-[#22c55e]" />
+                </span>
+                <span className="flex items-center gap-1 px-1.5 py-0.5 bg-[#22c55e]/10 rounded-full ml-auto">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] animate-pulse" />
+                  <span className="text-[#22c55e] text-[10px] font-semibold tracking-wide">AO VIVO</span>
+                </span>
+              </div>
+              <p className="text-gray-500 text-xs mb-1">Utilizadores online</p>
+              <p className="text-3xl font-bold tabular-nums text-[#22c55e]">
+                {onlineCount === null ? '—' : onlineCount.toLocaleString('pt-PT')}
+              </p>
+            </div>
+
+            {/* Total de utilizadores — sem persistência (BD) ainda */}
+            <div className="bg-[#0d1117] border border-[#1a1f2e] rounded-2xl p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="w-9 h-9 rounded-xl bg-gray-500/10 flex items-center justify-center">
+                  <User size={18} className="text-gray-500" />
+                </span>
+              </div>
+              <p className="text-gray-500 text-xs mb-1">Total de utilizadores</p>
+              <p className="text-xl font-semibold text-gray-600">Indisponível</p>
+              <p className="text-gray-600 text-[11px] mt-2 leading-relaxed">
+                Requer base de dados de utilizadores registados, ainda não implementada.
+              </p>
+            </div>
+
+            {/* Comissão por markup — sem integração Partner Hub ainda */}
+            <div className="bg-[#0d1117] border border-[#1a1f2e] rounded-2xl p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="w-9 h-9 rounded-xl bg-gray-500/10 flex items-center justify-center">
+                  <Gem size={18} className="text-gray-500" />
+                </span>
+              </div>
+              <p className="text-gray-500 text-xs mb-1">Comissão (markup)</p>
+              <p className="text-xl font-semibold text-gray-600">Indisponível</p>
+              <p className="text-gray-600 text-[11px] mt-2 leading-relaxed">
+                Requer integração de markup/revenue-share no Partner Hub da Deriv.
+              </p>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Vista: Menu (normal) ─────────────────────────────────────
   return (
     <div className="min-h-screen min-h-dvh bg-[#0a0e1a] text-white">
       <button
@@ -223,7 +323,7 @@ export default function MenuPage() {
           <p className="text-gray-500 text-xs tracking-[2px] uppercase">FOREX TRADING PLATFORM</p>
         </div>
 
-        {/* Online Count */}
+        {/* Online Count — real, vindo do backend */}
         <div className="flex items-center justify-between px-4 py-3 bg-[#0d1117] rounded-xl mb-4">
           <div className="flex items-center gap-2">
             <Globe
@@ -238,7 +338,7 @@ export default function MenuPage() {
             </span>
           </div>
           <span className="text-[#22c55e] font-bold tabular-nums">
-            {onlineCount.toLocaleString('pt-PT')}
+            {onlineCount === null ? '—' : onlineCount.toLocaleString('pt-PT')}
           </span>
         </div>
         <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
@@ -446,7 +546,8 @@ export default function MenuPage() {
           </div>
         </div>
 
-        {/* Admin Panel */}
+        {/* Admin Panel — navega para /admin (página fullscreen
+            dedicada, com a sua própria verificação de isAdmin) */}
         {isAdmin && (
           <>
             <div className="h-px bg-[#1a1f2e] mb-4" />
@@ -456,7 +557,7 @@ export default function MenuPage() {
             </div>
             <div className="space-y-1 mb-4">
               <button
-                onClick={() => navigateTo('/admin')}
+                onClick={() => setView('admin')}
                 className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#1a1f2e] rounded-xl transition-colors"
               >
                 <span className="flex items-center justify-center w-8 h-8 rounded-lg text-[#f59e0b]">
