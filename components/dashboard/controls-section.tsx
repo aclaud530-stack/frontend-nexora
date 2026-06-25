@@ -9,6 +9,7 @@ import {
 } from '@/lib/nexora.types'
 import { CatalogBot } from '@/lib/use-nexora-ws'
 import { useLoader } from '@/components/loader'
+import { api } from '@/lib/api'
 
 const Ico = {
   Refresh: ({ spin }: { spin?: boolean }) => (
@@ -217,6 +218,15 @@ export function ControlsSection() {
   } = useBots()
   const loader = useLoader()
 
+  // Rótulos de exibição personalizáveis (Real/Demo) — definidos por
+  // admins em /menu, persistidos no backend. Só afetam o TEXTO
+  // mostrado; a lógica de qual conta é real/demo (is_virtual) nunca
+  // é alterada por isto.
+  const [accLabels, setAccLabels] = useState({ realLabel: 'Real', demoLabel: 'Demo' })
+  useEffect(() => {
+    api.getAccountLabels().then(setAccLabels).catch(() => {})
+  }, [])
+
   const [showAccDrop,   setShowAccDrop]   = useState(false)
   const [showBotDrop,   setShowBotDrop]   = useState(false)
   const [showConfig,    setShowConfig]    = useState(false)
@@ -352,13 +362,13 @@ export function ControlsSection() {
   const handleAccSelect = async (acc: typeof accounts[number]) => {
     setShowAccDrop(false)
     if (currentAccount?.account_id === acc.account_id) return
-    const label = acc.is_virtual ? 'Conta Demo' : 'Conta Real'
+    const label = acc.is_virtual ? `Conta ${accLabels.demoLabel}` : `Conta ${accLabels.realLabel}`
     loader.show(`A ligar a ${label}…`)
     try { await setCurrentAccount(acc); loader.complete(`${label} activa!`) }
     catch { loader.hide() }
   }
 
-  const accLabel = !currentAccount ? 'Selecionar' : currentAccount.is_virtual ? 'Demo' : 'Real'
+  const accLabel = !currentAccount ? 'Selecionar' : currentAccount.is_virtual ? accLabels.demoLabel : accLabels.realLabel
   const accColor = !currentAccount ? '#6b7280' : currentAccount.is_virtual ? '#2ec7ff' : '#22c55e'
 
   return (
@@ -394,7 +404,7 @@ export function ControlsSection() {
                 {accounts.map(a => (
                   <button key={a.account_id} onClick={() => handleAccSelect(a)}
                     className={`w-full px-4 py-2.5 text-left text-sm hover:bg-[#1f2a3c] transition-colors ${currentAccount?.account_id === a.account_id ? 'text-[#22c55e]' : 'text-white'}`}>
-                    {a.is_virtual ? 'Conta Demo' : 'Conta Real'}
+                    {a.is_virtual ? `Conta ${accLabels.demoLabel}` : `Conta ${accLabels.realLabel}`}
                     <span className="text-gray-500 text-xs"> — ${Number(a.balance ?? 0).toFixed(2)}</span>
                   </button>
                 ))}
