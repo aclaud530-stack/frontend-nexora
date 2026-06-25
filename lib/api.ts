@@ -42,6 +42,15 @@ export interface BotStatus {
   progress: number
 }
 
+// Rótulos de exibição para os tipos de conta. Só texto — nunca troca
+// qual conta é "real" e qual é "demo" (isso vem sempre de is_virtual/
+// account_type da Deriv). Configurável apenas por admins, via
+// /api/admin/labels, persistido no backend (Redis).
+export interface AccountLabels {
+  realLabel: string
+  demoLabel: string
+}
+
 function getToken(): string | null {
   if (typeof window !== 'undefined') return localStorage.getItem('token')
   return null
@@ -184,5 +193,36 @@ export const api = {
     } catch {
       return { isAdmin: false }
     }
+  },
+
+  // ── Rótulos de exibição das contas (Real/Demo) ────────────────────────────
+  // Só texto de exibição — nunca altera qual conta é realmente real ou
+  // demo. Leitura disponível a qualquer utilizador; escrita só a admins
+  // (validado no backend via x-cr contra ADMIN_ACCOUNT_IDS).
+
+  async getAccountLabels(): Promise<AccountLabels> {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/admin/labels`)
+      return res.json()
+    } catch {
+      return { realLabel: 'Real', demoLabel: 'Demo' }
+    }
+  },
+
+  async setAccountLabels(accountId: string, labels: Partial<AccountLabels>): Promise<AccountLabels> {
+    const res = await fetch(`${API_BASE_URL}/api/admin/labels`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getToken()}`,
+        'x-cr': accountId,
+      },
+      body: JSON.stringify(labels),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || `HTTP ${res.status}`)
+    }
+    return res.json()
   },
 }
