@@ -2,11 +2,17 @@
 
 // ============================================================
 // NEXORA FOREX — Bots Context
-// Fluxo correcto: Admin gere catálogo → Utilizador escolhe bot
-//                 → configura parâmetros → executa na sessão
+//
+// CORRECÇÕES:
+//   ✅ token/accountId com useState reactivo (não useMemo+localStorage)
+//   ✅ Bridge onBalance/onTick → TradingContext._setBalance/_setTick
+//   ✅ wsStatus propagado via trading._setConnected
 // ============================================================
 
-import { createContext, useContext, useState, useCallback, useRef, useMemo, ReactNode } from 'react'
+import {
+  createContext, useContext, useState, useCallback,
+  useRef, useEffect, ReactNode,
+} from 'react'
 import {
   BotSummary, BotState, BotEvent, BotLogEntry,
   BotStats, BotConfig, BotStrategyType,
@@ -14,77 +20,46 @@ import {
 } from './nexora.types'
 import { useNexoraWs, WsStatus, CatalogBot } from './use-nexora-ws'
 import { useAuth } from './auth-context'
-
-// ─── TradeRecord para a UI ────────────────────────────────────
-// Campos alinhados com a tabela simplificada: Hora | Tipo | Tick Final | Preço | Resultado
+import { useTrading, Trade } from './contexto-de-negociação'
 
 export interface TradeRecord {
-  id:           string
-  hora:         string
-  botId:        string
-  botName:      string
-  strategy:     string
-  stake:        number       // coluna "Preço" (valor apostado)
-  profit:       number       // coluna "Resultado"
-  won:          boolean
-  timestamp:    number
-  pending?:     boolean
-  direction?:   string
-  contractType?: string      // coluna "Tipo" (ex: CALL, PUT, DIGITOVER)
-  exitTick?:    number       // coluna "Tick Final"
+  id:            string
+  hora:          string
+  botId:         string
+  botName:       string
+  strategy:      string
+  stake:         number
+  profit:        number
+  won:           boolean
+  timestamp:     number
+  pending?:      boolean
+  direction?:    string
+  contractType?: string
+  exitTick?:     number
 }
 
-// ─── Contexto ─────────────────────────────────────────────────
-
 interface BotsCtx {
-  // Catálogo (bots disponíveis, geridos pelo admin)
-  catalogBots:    CatalogBot[]
+  catalogBots:      CatalogBot[]
   isLoadingCatalog: boolean
-
-  // Sessão do utilizador (bots em execução)
-  sessionBots:    BotSummary[]
-  botStates:      Record<string, BotState>
-
-  // Estado geral
-  wsStatus:       WsStatus
-  lastError:      string | null
-  // Mensagem de evento (meta atingida, stop de perda, saldo insuficiente)
-  statusMessage:  { text: string; kind: 'success' | 'warning' | 'error' } | null
-
-  // Histórico de trades
-  trades:         TradeRecord[]
-  botTrades:      Record<string, TradeRecord[]>
-  openTrades:     Record<string, TradeRecord>
-  botLogs:        Record<string, BotLogEntry[]>
-
-  // Acções — Catálogo (só leitura para utilizadores)
-  listCatalogBots: () => void
-  listSessionBots: () => void
-
-  // Iniciar bot do catálogo (utilizador escolhe e define parâmetros)
-  startCatalogBot: (
-    catalogBotId:   string,
-    sessionName?:   string,
-    configOverride?: Partial<BotConfig>,
-  ) => void
-
-  // Controlo dos bots da sessão
-  stopBot:    (botId: string) => void
-  pauseBot:   (botId: string) => void
-  resumeBot:  (botId: string) => void
-  deleteBot:  (botId: string) => void
-  getBotLogs: (botId: string, limit?: number) => void
-  clearTrades: () => void
-
-  // Admin — gerir catálogo
-  adminAddCatalogBot: (dto: {
-    name: string;
-    description: string;
-    strategy: BotStrategyType;
-    defaultConfig: BotConfig;
-    tags?: string[];
-    isActive?: boolean;
-  }) => void
+  sessionBots:      BotSummary[]
+  botStates:        Record<string, BotState>
+  wsStatus:         WsStatus
+  lastError:        string | null
+  statusMessage:    { text: string; kind: 'success' | 'warning' | 'error' } | null
+  trades:           TradeRecord[]
+  botTrades:        Record<string, TradeRecord[]>
+  openTrades:       Record<string, TradeRecord>
+  botLogs:          Record<string, BotLogEntry[]>
+  listCatalogBots:  () => void
+  listSessionBots:  () => void
+  startCatalogBot:  (catalogBotId: string, sessionName?: string, configOverride?: Partial<BotConfig>) => void
+  stopBot:          (botId: string) => void
+  pauseBot:         (botId: string) => void
+  resumeBot:        (botId: string) => void
+  deleteBot:        (botId: string) => void
+  getBotLogs:       (botId: string, limit?: number) => void
+  clearTrades:      () => void
+  adminAddCatalogBot:    (dto: { name: string; description: string; strategy: BotStrategyType; defaultConfig: BotConfig; tags?: string[]; isActive?: boolean }) => void
   adminRemoveCatalogBot: (id: string) => void
   adminUpdateCatalogBot: (id: string, updates: Record<string, unknown>) => void
 }
@@ -97,51 +72,34 @@ export function useBots() {
   return c
 }
 
-// ─── Provider ─────────────────────────────────────────────────
-
 const MAX_TRADES = 300
 
 export function BotsProvider({ children }: { children: ReactNode }) {
-  // Token/conta da sessão Deriv — necessários para autenticar esta
-  // ligação WS no backend Nexora. Sem isto, o backend nunca marca a
-  // sessão como autenticada e start_catalog_bot/stop_bot/etc. falham
-  // sempre com "Not authenticated".
-  // Mesmo padrão usado em TradingProviderWithAuth (providers.tsx):
-  // espera isLoading terminar e usa fallback de localStorage para a conta.
   const { isLoading, currentAccount } = useAuth()
-  const { token, accountId } = useMemo(() => {
-    if (isLoading || typeof window === 'undefined') {
-      return { token: null as string | null, accountId: null as string | null }
-    }
-    return {
-      token:     localStorage.getItem('token') || null,
-      accountId: currentAccount?.account_id || localStorage.getItem('currentAccountId') || null,
-    }
+  const trading = useTrading()
+
+  // ── CORRECÇÃO: useState reactivo em vez de useMemo + localStorage
+  const [token,     setToken]     = useState<string | null>(null)
+  const [accountId, setAccountId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (isLoading || typeof window === 'undefined') return
+    setToken(localStorage.getItem('token'))
+    setAccountId(currentAccount?.account_id || localStorage.getItem('currentAccountId') || null)
   }, [isLoading, currentAccount?.account_id])
 
-  // Catálogo (gerido pelo admin, só leitura para o utilizador)
-  const [catalogBots,     setCatalogBots]     = useState<CatalogBot[]>([])
+  const [catalogBots,      setCatalogBots]      = useState<CatalogBot[]>([])
   const [isLoadingCatalog, setIsLoadingCatalog] = useState(true)
+  const [sessionBots,      setSessionBots]      = useState<BotSummary[]>([])
+  const [botStates,        setBotStates]        = useState<Record<string, BotState>>({})
+  const [trades,           setTrades]           = useState<TradeRecord[]>([])
+  const [botTrades,        setBotTrades]        = useState<Record<string, TradeRecord[]>>({})
+  const [openTrades,       setOpenTrades]       = useState<Record<string, TradeRecord>>({})
+  const [botLogs,          setBotLogs]          = useState<Record<string, BotLogEntry[]>>({})
+  const [lastError,        setLastError]        = useState<string | null>(null)
+  const [statusMessage,    setStatusMessage]    = useState<{ text: string; kind: 'success' | 'warning' | 'error' } | null>(null)
 
-  // Bots da sessão (instâncias em execução do utilizador)
-  const [sessionBots,     setSessionBots]     = useState<BotSummary[]>([])
-  const [botStates,       setBotStates]       = useState<Record<string, BotState>>({})
-
-  // Trades e logs
-  const [trades,          setTrades]          = useState<TradeRecord[]>([])
-  const [botTrades,       setBotTrades]       = useState<Record<string, TradeRecord[]>>({})
-  const [openTrades,      setOpenTrades]      = useState<Record<string, TradeRecord>>({})
-  const [botLogs,         setBotLogs]         = useState<Record<string, BotLogEntry[]>>({})
-
-  const [lastError,       setLastError]       = useState<string | null>(null)
-
-  // Mensagem de estado (meta atingida, stop de perda, saldo insuficiente)
-  // Separada do lastError para a UI poder estilizar diferente (success/warning/error).
-  const [statusMessage, setStatusMessage] = useState<{ text: string; kind: 'success' | 'warning' | 'error' } | null>(null)
-
-  // Ref síncrona para lookup de nome/strategy por botId
   const sessionBotsRef = useRef<BotSummary[]>([])
-
   const getBotMeta = (botId: string) => {
     const b = sessionBotsRef.current.find(x => x.id === botId)
     return { name: b?.name ?? botId, strategy: b?.strategy ?? 'unknown' }
@@ -156,226 +114,127 @@ export function BotsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const showError = useCallback((msg: string) => {
-    setLastError(msg)
-    setTimeout(() => setLastError(null), 6000)
+    setLastError(msg); setTimeout(() => setLastError(null), 6000)
   }, [])
-
   const showStatusMessage = useCallback((text: string, kind: 'success' | 'warning' | 'error') => {
-    setStatusMessage({ text, kind })
-    setTimeout(() => setStatusMessage(null), 8000)
+    setStatusMessage({ text, kind }); setTimeout(() => setStatusMessage(null), 8000)
   }, [])
 
-  // ── Catálogo carregado ────────────────────────────────────────
-  const handleCatalogLoaded = useCallback((bots: CatalogBot[]) => {
-    setCatalogBots(bots)
-    setIsLoadingCatalog(false)
-  }, [])
-
-  // ── Bots da sessão carregados ─────────────────────────────────
-  const handleSessionBotsLoaded = useCallback((bots: BotSummary[]) => {
-    sessionBotsRef.current = bots
-    setSessionBots(bots)
-  }, [])
-
-  // ── Bot iniciado a partir do catálogo ─────────────────────────
+  const handleCatalogLoaded     = useCallback((bots: CatalogBot[]) => { setCatalogBots(bots); setIsLoadingCatalog(false) }, [])
+  const handleSessionBotsLoaded = useCallback((bots: BotSummary[]) => { sessionBotsRef.current = bots; setSessionBots(bots) }, [])
   const handleBotStarted = useCallback((bot: BotState & { catalogBotId?: string }) => {
-    const summary: BotSummary = {
-      id: bot.id, name: bot.name, strategy: bot.strategy,
-      status: bot.status, stats: bot.stats,
-      startedAt: bot.startedAt, stoppedAt: bot.stoppedAt,
-    }
-    setSessionBots(prev => {
-      const next = [...prev, summary]
-      sessionBotsRef.current = next
-      return next
-    })
+    const summary: BotSummary = { id: bot.id, name: bot.name, strategy: bot.strategy, status: bot.status, stats: bot.stats, startedAt: bot.startedAt, stoppedAt: bot.stoppedAt }
+    setSessionBots(prev => { const next = [...prev, summary]; sessionBotsRef.current = next; return next })
     setBotStates(prev => ({ ...prev, [bot.id]: bot }))
   }, [])
-
-  // ── Logs recebidos ────────────────────────────────────────────
   const handleBotLogs = useCallback((botId: string, logs: BotLogEntry[]) => {
     setBotLogs(prev => ({ ...prev, [botId]: logs }))
   }, [])
 
-  // ── Eventos do BotManager ─────────────────────────────────────
+  // ── Bridge: dados de mercado do backend → TradingContext ──────
+  const handleBalance = useCallback((balance: number, currency: string) => {
+    trading._setBalance(balance, currency)
+  }, [trading._setBalance])
+
+  const handleTick = useCallback((quote: number) => {
+    trading._setTick(quote)
+  }, [trading._setTick])
+
   const handleBotEvent = useCallback((ev: BotEvent) => {
     const { type, botId, payload } = ev
-
     switch (type) {
-
       case 'bot:started':
         patchSessionBot(botId, { status: 'running', startedAt: new Date().toISOString() as any })
-        break
-
+        trading._setBotStatus({ isRunning: true, currentStep: 'analyzing' }); break
       case 'bot:stopped':
         patchSessionBot(botId, { status: 'stopped', stoppedAt: new Date().toISOString() as any })
-        setOpenTrades(prev => {
-          const n = { ...prev }
-          Object.keys(n).forEach(k => { if (n[k].botId === botId) delete n[k] })
-          return n
-        })
-        break
-
+        trading._setBotStatus({ isRunning: false, currentStep: 'idle' })
+        setOpenTrades(prev => { const n = { ...prev }; Object.keys(n).forEach(k => { if (n[k].botId === botId) delete n[k] }); return n }); break
       case 'bot:paused':
         patchSessionBot(botId, { status: 'paused' })
-        break
-
+        trading._setBotStatus({ isRunning: false, currentStep: 'idle' }); break
       case 'bot:resumed':
         patchSessionBot(botId, { status: 'running' })
-        break
-
+        trading._setBotStatus({ isRunning: true, currentStep: 'analyzing' }); break
       case 'bot:error': {
         const msg = (payload as { error?: string }).error ?? 'Erro desconhecido'
         patchSessionBot(botId, { status: 'error' })
-        setBotStates(p => ({
-          ...p,
-          [botId]: p[botId] ? { ...p[botId], lastError: msg, status: 'error' } : p[botId],
-        }))
-        showError(`Bot: ${msg}`)
-        break
+        setBotStates(p => ({ ...p, [botId]: p[botId] ? { ...p[botId], lastError: msg, status: 'error' } : p[botId] }))
+        showError(`Bot: ${msg}`); break
       }
-
       case 'bot:stats_updated': {
-        const stats = (payload as { stats?: BotStats }).stats
-        if (!stats) break
+        const stats = (payload as { stats?: BotStats }).stats; if (!stats) break
         patchSessionBot(botId, { stats })
-        setBotStates(p => ({
-          ...p,
-          [botId]: p[botId] ? { ...p[botId], stats } : p[botId],
-        }))
-        break
+        setBotStates(p => ({ ...p, [botId]: p[botId] ? { ...p[botId], stats } : p[botId] })); break
       }
-
       case 'bot:trade_opened': {
-        const p = payload as unknown as TradeOpenedPayload
-        if (!p?.contractId) break
+        const p = payload as unknown as TradeOpenedPayload; if (!p?.contractId) break
         const { name, strategy } = getBotMeta(botId)
-        const rec: TradeRecord = {
-          id: p.contractId, hora: new Date().toLocaleTimeString('pt-PT'),
-          botId, botName: name, strategy,
-          stake: p.stake, profit: 0, won: false,
-          timestamp: Date.now(), pending: true, direction: p.direction,
-        }
+        const rec: TradeRecord = { id: p.contractId, hora: new Date().toLocaleTimeString('pt-PT'), botId, botName: name, strategy, stake: p.stake, profit: 0, won: false, timestamp: Date.now(), pending: true, direction: p.direction }
         setOpenTrades(prev => ({ ...prev, [p.contractId]: rec }))
-        break
+        trading._setBotStatus({ isRunning: true, currentStep: 'contract_open' }); break
       }
-
       case 'bot:trade_closed': {
-        const p = payload as unknown as TradeClosedPayload
-        if (!p?.contractId) break
+        const p = payload as unknown as TradeClosedPayload; if (!p?.contractId) break
         const { name, strategy } = getBotMeta(botId)
-        const rec: TradeRecord = {
-          id: p.contractId, hora: new Date().toLocaleTimeString('pt-PT'),
-          botId, botName: name, strategy,
-          stake: p.stake, profit: p.profit, won: p.won,
-          timestamp: Date.now(), pending: false,
-          contractType: p.contractType, exitTick: p.exitTick,
-        }
+        const rec: TradeRecord = { id: p.contractId, hora: new Date().toLocaleTimeString('pt-PT'), botId, botName: name, strategy, stake: p.stake, profit: p.profit, won: p.won, timestamp: Date.now(), pending: false, contractType: p.contractType, exitTick: p.exitTick }
         setOpenTrades(prev => { const n = { ...prev }; delete n[p.contractId]; return n })
         setTrades(prev => [rec, ...prev].slice(0, MAX_TRADES))
-        setBotTrades(prev => ({
-          ...prev,
-          [botId]: [rec, ...(prev[botId] ?? [])].slice(0, MAX_TRADES),
-        }))
-        break
+        setBotTrades(prev => ({ ...prev, [botId]: [rec, ...(prev[botId] ?? [])].slice(0, MAX_TRADES) }))
+        const t: Trade = { id: rec.id, hora: rec.hora, tipo: rec.contractType ?? strategy, tickFinal: rec.exitTick ?? 0, preco: `$${rec.stake.toFixed(2)}`, resultado: rec.profit }
+        trading._addTrade(t)
+        trading._setBotStatus({ isRunning: true, currentStep: 'contract_closed' })
+        setTimeout(() => trading._setBotStatus({ isRunning: true, currentStep: 'analyzing' }), 1500); break
       }
-
       case 'bot:log': {
-        const entry = (payload as { entry?: BotLogEntry }).entry
-        if (!entry) break
-        setBotLogs(prev => ({
-          ...prev,
-          [botId]: [entry, ...(prev[botId] ?? [])].slice(0, 200),
-        }))
-        break
+        const entry = (payload as { entry?: BotLogEntry }).entry; if (!entry) break
+        setBotLogs(prev => ({ ...prev, [botId]: [entry, ...(prev[botId] ?? [])].slice(0, 200) })); break
       }
-
-      // ── Bot parou automaticamente: meta atingida, stop de perda,
-      // ou limite de trades. Mostra uma mensagem clara e específica.
       case 'bot:goal_reached': {
         const p = payload as { reason?: string; maxProfit?: number; maxLoss?: number; maxTrades?: number }
         const { name } = getBotMeta(botId)
         let msg = `${name}: parado automaticamente.`
-        if (p.reason === 'max_profit_reached') msg = `🎯 ${name}: Meta de lucro atingida! ($${p.maxProfit?.toFixed(2)})`
-        else if (p.reason === 'max_loss_reached') msg = `🛑 ${name}: Stop de perda atingido. ($${p.maxLoss?.toFixed(2)})`
+        if (p.reason === 'max_profit_reached')  msg = `🎯 ${name}: Meta de lucro atingida! ($${p.maxProfit?.toFixed(2)})`
+        else if (p.reason === 'max_loss_reached')   msg = `🛑 ${name}: Stop de perda atingido. ($${p.maxLoss?.toFixed(2)})`
         else if (p.reason === 'max_trades_reached') msg = `✅ ${name}: Limite de ${p.maxTrades} trades atingido.`
-        showStatusMessage(msg, p.reason === 'max_profit_reached' ? 'success' : 'warning')
-        break
+        showStatusMessage(msg, p.reason === 'max_profit_reached' ? 'success' : 'warning'); break
       }
-
-      // ── Saldo insuficiente para abrir um contrato — bot para a seguir.
       case 'bot:insufficient_balance': {
         const { name } = getBotMeta(botId)
-        showStatusMessage(`💰 ${name}: Saldo insuficiente para abrir um novo contrato. Bot parado.`, 'error')
-        break
+        showStatusMessage(`💰 ${name}: Saldo insuficiente. Bot parado.`, 'error'); break
       }
     }
-  }, [patchSessionBot, showError, showStatusMessage])
+  }, [patchSessionBot, showError, showStatusMessage, trading])
 
-  // Token inválido/expirado confirmado pelo backend: limpa a sessão
-  // local e leva o utilizador de volta ao login, em vez de continuar
-  // a martelar o backend com o mesmo token a cada reconexão WS.
   const handleAuthFailed = useCallback(() => {
     if (typeof window === 'undefined') return
     showError('Sessão expirada — por favor inicia sessão novamente.')
-    localStorage.removeItem('token')
-    localStorage.removeItem('currentAccountId')
+    localStorage.removeItem('token'); localStorage.removeItem('currentAccountId')
     setTimeout(() => { window.location.href = '/' }, 1500)
   }, [showError])
 
   const ws = useNexoraWs({
-    onCatalogLoaded:     handleCatalogLoaded,
-    onSessionBotsLoaded: handleSessionBotsLoaded,
-    onBotStarted:        handleBotStarted,
-    onBotEvent:          handleBotEvent,
-    onBotLogs:           handleBotLogs,
-    onError:             showError,
-    onAuthFailed:        handleAuthFailed,
-    token,
-    accountId,
+    onCatalogLoaded: handleCatalogLoaded, onSessionBotsLoaded: handleSessionBotsLoaded,
+    onBotStarted: handleBotStarted, onBotEvent: handleBotEvent,
+    onBotLogs: handleBotLogs, onError: showError, onAuthFailed: handleAuthFailed,
+    onBalance: handleBalance, onTick: handleTick,
+    token, accountId,
   })
 
-  const clearTrades = useCallback(() => {
-    setTrades([])
-    setBotTrades({})
-  }, [])
+  useEffect(() => { trading._setConnected(ws.wsStatus === 'connected') }, [ws.wsStatus]) // eslint-disable-line
+
+  const clearTrades = useCallback(() => { setTrades([]); setBotTrades({}) }, [])
 
   return (
     <Ctx.Provider value={{
-      // Catálogo
-      catalogBots,
-      isLoadingCatalog,
-
-      // Sessão
-      sessionBots,
-      botStates,
-
-      // Estado
-      wsStatus: ws.wsStatus,
-      lastError,
-      statusMessage,
-
-      // Trades / logs
-      trades,
-      botTrades,
-      openTrades,
-      botLogs,
-
-      // Acções — catálogo
-      listCatalogBots: ws.listCatalogBots,
-      listSessionBots: ws.listSessionBots,
+      catalogBots, isLoadingCatalog, sessionBots, botStates,
+      wsStatus: ws.wsStatus, lastError, statusMessage,
+      trades, botTrades, openTrades, botLogs,
+      listCatalogBots: ws.listCatalogBots, listSessionBots: ws.listSessionBots,
       startCatalogBot: ws.startCatalogBot,
-
-      // Acções — controlo de sessão
-      stopBot:    ws.stopBot,
-      pauseBot:   ws.pauseBot,
-      resumeBot:  ws.resumeBot,
-      deleteBot:  ws.deleteBot,
-      getBotLogs: ws.getBotLogs,
-      clearTrades,
-
-      // Admin
-      adminAddCatalogBot:    ws.adminAddCatalogBot,
+      stopBot: ws.stopBot, pauseBot: ws.pauseBot, resumeBot: ws.resumeBot,
+      deleteBot: ws.deleteBot, getBotLogs: ws.getBotLogs, clearTrades,
+      adminAddCatalogBot: ws.adminAddCatalogBot,
       adminRemoveCatalogBot: ws.adminRemoveCatalogBot,
       adminUpdateCatalogBot: ws.adminUpdateCatalogBot,
     }}>
