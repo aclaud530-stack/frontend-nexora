@@ -1,9 +1,10 @@
+typescript
+
 'use client'
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth-context'
-import { useTrading } from '@/lib/trading-context'
 import { useLoader } from '@/components/loader'
 import { api } from '@/lib/api'
 import {
@@ -31,9 +32,6 @@ import {
 
 const WHATSAPP = '976289984'
 
-// Intervalo de actualização da contagem de utilizadores online.
-// Pedido ao backend (/api/online-count), não simulado — reflecte
-// sessões realmente autenticadas neste momento.
 const ONLINE_POLL_INTERVAL_MS = 15_000
 
 const LOCAL_AVISOS = [
@@ -83,25 +81,19 @@ Para questões, contacte-nos via WhatsApp: +${WHATSAPP}`
 export default function MenuPage() {
   const router = useRouter()
   const { currentAccount, logout } = useAuth()
-  const { disconnect } = useTrading()
+  // CORRECÇÃO: useTrading removido — disconnect não existe no novo
+  // trading-context (que já não abre WS próprio). O WS do backend
+  // fecha automaticamente quando o BotsProvider desmonta.
   const { show, complete, hide } = useLoader()
 
-  // Contagem real de utilizadores online — vinda do backend, nunca
-  // simulada. Começa em null para distinguir "ainda não carregou"
-  // de "0 utilizadores online" (ambos são estados válidos e diferentes).
   const [onlineCount, setOnlineCount] = useState<number | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
 
-  // Rótulos de exibição personalizáveis (Real/Demo) — só texto,
-  // nunca troca qual conta é realmente real ou demo.
   const [realLabel, setRealLabel] = useState('Real')
   const [demoLabel, setDemoLabel] = useState('Demo')
   const [labelsSaving, setLabelsSaving] = useState(false)
   const [labelsSavedMsg, setLabelsSavedMsg] = useState('')
 
-  // Controla qual ecrã se mostra dentro deste mesmo ficheiro/componente
-  // — 'menu' (normal) ou 'admin' (painel fullscreen). Sem rota própria,
-  // sem ficheiro novo: tudo vive aqui.
   const [view, setView] = useState<'menu' | 'admin'>('menu')
   const [isLoading, setIsLoading] = useState(true)
   const [avisosOpen, setAvisosOpen] = useState(false)
@@ -109,9 +101,6 @@ export default function MenuPage() {
   const [termosTab, setTermosTab] = useState<'plataforma' | 'deriv'>('plataforma')
   const unreadAvisos = LOCAL_AVISOS.length
 
-  // Carrega os rótulos actuais sempre que o painel admin abre —
-  // assim reflecte o que está realmente guardado no backend (Redis),
-  // mesmo que tenha sido alterado noutro dispositivo.
   useEffect(() => {
     if (view !== 'admin') return
     let cancelled = false
@@ -140,24 +129,15 @@ export default function MenuPage() {
     }
   }
 
-
   useEffect(() => {
     let cancelled = false
-
     const fetchOnlineCount = async () => {
       try {
         const result = await api.getOnlineCount()
-        // Defesa extra: se o backend devolver algo inesperado (404,
-        // HTML de erro, payload sem "count"), nunca propaga undefined
-        // para o estado — isso é o que causava o crash em toLocaleString.
         const count = typeof result?.count === 'number' ? result.count : null
         if (!cancelled && count !== null) setOnlineCount(count)
-      } catch {
-        // Mantém o último valor conhecido em caso de falha pontual
-        // da rede — não esconde nem inventa um número.
-      }
+      } catch { /* mantém último valor */ }
     }
-
     fetchOnlineCount()
     const interval = setInterval(fetchOnlineCount, ONLINE_POLL_INTERVAL_MS)
     return () => { cancelled = true; clearInterval(interval) }
@@ -185,11 +165,14 @@ export default function MenuPage() {
   }
 
   const goBack = () => { show('A carregar...'); router.push('/dashboard') }
-  const handleLogout = async () => { 
+
+  // CORRECÇÃO: disconnect() removido — o WS fecha automaticamente
+  // quando o componente desmonta (cleanup do useNexoraWs).
+  const handleLogout = async () => {
     show('A sair...')
-    disconnect() // Desconectar WebSocket antes de logout
-    await logout() 
+    await logout()
   }
+
   const navigateTo = (path: string) => { show('A carregar...'); router.push(path) }
 
   const MenuItem = ({
@@ -247,23 +230,15 @@ export default function MenuPage() {
     )
   }
 
-  // Protecção extra: se isAdmin deixar de ser verdadeiro enquanto a
-  // vista admin está aberta, volta automaticamente ao menu. Feito em
-  // efeito (não durante o render) para evitar o anti-padrão de
-  // actualizar estado a meio da renderização.
   useEffect(() => {
     if (view === 'admin' && !isAdmin) setView('menu')
   }, [view, isAdmin])
 
   if (isLoading) return null
 
-  // ── Vista: Painel Admin (fullscreen, dentro do mesmo ficheiro) ──
-  // Protegido por isAdmin (já confirmado junto do backend em loadData()
-  // via api.checkAdmin).
   if (view === 'admin' && isAdmin) {
     return (
       <div className="min-h-screen min-h-dvh bg-[#0a0e1a] text-white">
-
         <div className="sticky top-0 z-10 bg-[#0a0e1a]/95 backdrop-blur-sm border-b border-[#1a1f2e]">
           <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex items-center gap-4">
             <button
@@ -280,14 +255,9 @@ export default function MenuPage() {
         </div>
 
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
-
-          <p className="text-gray-500 text-sm mb-8">
-            Visão geral da plataforma — dados em tempo real do backend.
-          </p>
+          <p className="text-gray-500 text-sm mb-8">Visão geral da plataforma — dados em tempo real do backend.</p>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
-
-            {/* Online — dado real, mesma fonte do contador do menu */}
             <div className="bg-[#0d1117] border border-[#1a1f2e] rounded-2xl p-6">
               <div className="flex items-center gap-2 mb-4">
                 <span className="w-9 h-9 rounded-xl bg-[#22c55e]/10 flex items-center justify-center">
@@ -304,7 +274,6 @@ export default function MenuPage() {
               </p>
             </div>
 
-            {/* Total de utilizadores — sem persistência (BD) ainda */}
             <div className="bg-[#0d1117] border border-[#1a1f2e] rounded-2xl p-6">
               <div className="flex items-center gap-2 mb-4">
                 <span className="w-9 h-9 rounded-xl bg-gray-500/10 flex items-center justify-center">
@@ -318,7 +287,6 @@ export default function MenuPage() {
               </p>
             </div>
 
-            {/* Comissão por markup — sem integração Partner Hub ainda */}
             <div className="bg-[#0d1117] border border-[#1a1f2e] rounded-2xl p-6">
               <div className="flex items-center gap-2 mb-4">
                 <span className="w-9 h-9 rounded-xl bg-gray-500/10 flex items-center justify-center">
@@ -331,99 +299,61 @@ export default function MenuPage() {
                 Requer integração de markup/revenue-share no Partner Hub da Deriv.
               </p>
             </div>
-
           </div>
 
-          {/* ── Rótulos de exibição (Real/Demo) ─────────────────
-              Apenas texto de exibição. Nunca troca qual conta é
-              realmente real ou demo — isso continua sempre a vir
-              de is_virtual/account_type da Deriv, intocado. */}
           <div className="mt-6 bg-[#0d1117] border border-[#1a1f2e] rounded-2xl p-6">
             <h2 className="text-white font-semibold text-sm mb-1">Rótulos de exibição das contas</h2>
             <p className="text-gray-500 text-xs mb-5 leading-relaxed">
-              Personaliza apenas o texto mostrado para cada tipo de conta
-              (ex: "Conta Ao Vivo" em vez de "Real"). Não altera qual conta
-              é realmente real ou demo.
+              Personaliza apenas o texto mostrado para cada tipo de conta. Não altera qual conta é realmente real ou demo.
             </p>
-
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-gray-400 text-xs mb-1.5">Rótulo da conta real</label>
-                <input
-                  type="text"
-                  value={realLabel}
-                  onChange={e => setRealLabel(e.target.value)}
-                  placeholder="Real"
-                  className="w-full bg-[#1a1f2e] border border-[#2a3142] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#2ec7ff]"
-                />
+                <input type="text" value={realLabel} onChange={e => setRealLabel(e.target.value)} placeholder="Real"
+                  className="w-full bg-[#1a1f2e] border border-[#2a3142] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#2ec7ff]" />
               </div>
               <div>
                 <label className="block text-gray-400 text-xs mb-1.5">Rótulo da conta demo</label>
-                <input
-                  type="text"
-                  value={demoLabel}
-                  onChange={e => setDemoLabel(e.target.value)}
-                  placeholder="Demo"
-                  className="w-full bg-[#1a1f2e] border border-[#2a3142] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#2ec7ff]"
-                />
+                <input type="text" value={demoLabel} onChange={e => setDemoLabel(e.target.value)} placeholder="Demo"
+                  className="w-full bg-[#1a1f2e] border border-[#2a3142] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#2ec7ff]" />
               </div>
             </div>
-
             <div className="flex items-center gap-3 mt-5">
-              <button
-                onClick={handleSaveLabels}
-                disabled={labelsSaving}
-                className="px-5 py-2.5 rounded-xl bg-[#2ec7ff] text-[#0a0e1a] text-sm font-semibold hover:bg-[#5ad4ff] transition-colors disabled:opacity-50"
-              >
+              <button onClick={handleSaveLabels} disabled={labelsSaving}
+                className="px-5 py-2.5 rounded-xl bg-[#2ec7ff] text-[#0a0e1a] text-sm font-semibold hover:bg-[#5ad4ff] transition-colors disabled:opacity-50">
                 {labelsSaving ? 'A guardar...' : 'Guardar rótulos'}
               </button>
-              {labelsSavedMsg && (
-                <span className="text-xs text-gray-400">{labelsSavedMsg}</span>
-              )}
+              {labelsSavedMsg && <span className="text-xs text-gray-400">{labelsSavedMsg}</span>}
             </div>
           </div>
-
         </div>
       </div>
     )
   }
 
-  // ── Vista: Menu (normal) ─────────────────────────────────────
   return (
     <div className="min-h-screen min-h-dvh bg-[#0a0e1a] text-white">
-      <button
-        onClick={goBack}
-        className="fixed top-4 right-4 z-50 p-2 rounded-full bg-[#1a1f2e] hover:bg-[#2a3142] transition-colors"
-      >
+      <button onClick={goBack}
+        className="fixed top-4 right-4 z-50 p-2 rounded-full bg-[#1a1f2e] hover:bg-[#2a3142] transition-colors">
         <X size={20} />
       </button>
 
       <div className="max-w-md mx-auto px-4 py-12">
-        {/* Logo */}
         <div className="text-center mb-8">
-          <h1
-            className="text-2xl font-black tracking-[4px] mb-1"
+          <h1 className="text-2xl font-black tracking-[4px] mb-1"
             style={{
               fontFamily: 'Orbitron, system-ui, sans-serif',
               background: 'linear-gradient(135deg, #fff, #2ec7ff, #fff)',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-              backgroundClip: 'text'
-            }}
-          >
+              WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text',
+            }}>
             NEXORA
           </h1>
           <p className="text-gray-500 text-xs tracking-[2px] uppercase">FOREX TRADING PLATFORM</p>
         </div>
 
-        {/* Online Count — real, vindo do backend */}
         <div className="flex items-center justify-between px-4 py-3 bg-[#0d1117] rounded-xl mb-4">
           <div className="flex items-center gap-2">
-            <Globe
-              size={15}
-              className="text-[#22c55e]"
-              style={{ animation: 'spin 3s linear infinite' }}
-            />
+            <Globe size={15} className="text-[#22c55e]" style={{ animation: 'spin 3s linear infinite' }} />
             <span className="text-gray-400 text-sm">ONLINES</span>
             <span className="flex items-center gap-1 px-1.5 py-0.5 bg-[#22c55e]/10 rounded-full">
               <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] animate-pulse" />
@@ -438,66 +368,33 @@ export default function MenuPage() {
 
         <div className="h-px bg-[#1a1f2e] mb-4" />
 
-        {/* Menu Items */}
         <div className="space-y-1 mb-4">
-          <MenuItem
-            icon={LayoutDashboard}
-            label="DASHBOARD"
-            onClick={() => navigateTo('/dashboard')}
-          />
-          <MenuItem
-            icon={Bot}
-            label="OPERAR COM ROBÔS"
-            onClick={() => navigateTo('/dashboard')}
-          />
-          <MenuItem
-            icon={Landmark}
-            label="CADASTRO NA CORRETORA"
+          <MenuItem icon={LayoutDashboard} label="DASHBOARD" onClick={() => navigateTo('/dashboard')} />
+          <MenuItem icon={Bot} label="OPERAR COM ROBÔS" onClick={() => navigateTo('/dashboard')} />
+          <MenuItem icon={Landmark} label="CADASTRO NA CORRETORA"
             href="https://hub.deriv.com/tradershub/signup?t=hCp-xUFsKsktJe5FDKcTD2Nd7ZgqdRLk&utm_campaign=NEXORA&utm_medium=affiliate&utm_source=hCp-xUFsKsktJe5FDKcTD2Nd7ZgqdRLk"
-            external
-            iconColor="text-[#e63946]"
-          />
-          <MenuItem
-            icon={MessageCircle}
-            label="MENTORIA VIP WHATSAPP"
+            external iconColor="text-[#e63946]" />
+          <MenuItem icon={MessageCircle} label="MENTORIA VIP WHATSAPP"
             href={`https://wa.me/${WHATSAPP}?text=Ol%C3%A1%2C%20quero%20saber%20mais%20sobre%20a%20Mentoria%20VIP%20da%20Nexora%20Forex`}
-            external
-            iconColor="text-[#22c55e]"
-          />
-          <MenuItem
-            icon={Link2}
-            label="LINKS"
-            href="#"
-            external
-          />
+            external iconColor="text-[#22c55e]" />
+          <MenuItem icon={Link2} label="LINKS" href="#" external />
 
-          {/* Avisos com badge */}
-          <button
-            onClick={() => setAvisosOpen(!avisosOpen)}
-            className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#1a1f2e] rounded-xl transition-colors"
-          >
-            <span className="flex items-center justify-center w-8 h-8 rounded-lg text-[#f59e0b]">
-              <Bell size={18} />
-            </span>
+          <button onClick={() => setAvisosOpen(!avisosOpen)}
+            className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#1a1f2e] rounded-xl transition-colors">
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg text-[#f59e0b]"><Bell size={18} /></span>
             <span className="flex-1 text-white text-sm font-medium text-left">AVISOS</span>
             {unreadAvisos > 0 && (
               <span className="w-5 h-5 bg-[#ef4444] text-white text-xs font-bold rounded-full flex items-center justify-center">
                 {unreadAvisos}
               </span>
             )}
-            <ChevronDown
-              size={13}
-              className={`text-gray-500 transition-transform duration-200 ${avisosOpen ? 'rotate-180' : ''}`}
-            />
+            <ChevronDown size={13} className={`text-gray-500 transition-transform duration-200 ${avisosOpen ? 'rotate-180' : ''}`} />
           </button>
 
           {avisosOpen && (
             <div className="mx-2 rounded-xl overflow-hidden border border-[#2a3142]">
               {LOCAL_AVISOS.map((aviso, idx) => (
-                <div
-                  key={aviso.id}
-                  className={`px-4 py-3 bg-[#0d1117] ${idx < LOCAL_AVISOS.length - 1 ? 'border-b border-[#2a3142]' : ''}`}
-                >
+                <div key={aviso.id} className={`px-4 py-3 bg-[#0d1117] ${idx < LOCAL_AVISOS.length - 1 ? 'border-b border-[#2a3142]' : ''}`}>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-white text-xs font-semibold">{aviso.titulo}</span>
                     <span className="text-gray-500 text-xs">{aviso.data}</span>
@@ -508,113 +405,57 @@ export default function MenuPage() {
             </div>
           )}
 
-          {/* Treinamento — WhatsApp com mensagem de solicitação */}
-          <MenuItem
-            icon={GraduationCap}
-            label="TREINAMENTO COMPLETO"
+          <MenuItem icon={GraduationCap} label="TREINAMENTO COMPLETO"
             href={`https://wa.me/${WHATSAPP}?text=Ol%C3%A1%2C%20gostaria%20de%20solicitar%20acesso%20ao%20Treinamento%20VIP%20completo%20da%20Nexora%20Forex.%20Pode%20me%20dar%20mais%20informa%C3%A7%C3%B5es%3F`}
-            external
-            iconColor="text-[#3b82f6]"
-          />
+            external iconColor="text-[#3b82f6]" />
         </div>
 
         <div className="h-px bg-[#1a1f2e] mb-4" />
-
         <div className="space-y-1 mb-4">
-          <MenuItem
-            icon={Gem}
-            label="PRODUTOS VIP"
-            href="#"
-            external
-            iconColor="text-[#a855f7]"
-            badge="VIP"
-          />
+          <MenuItem icon={Gem} label="PRODUTOS VIP" href="#" external iconColor="text-[#a855f7]" badge="VIP" />
         </div>
 
         <div className="h-px bg-[#1a1f2e] mb-4" />
-
         <div className="space-y-1 mb-4">
-          <MenuItem
-            icon={DownloadCloud}
-            label="DOWNLOADS"
-            href="#"
-            external
-            iconColor="text-[#2ec7ff]"
-          />
+          <MenuItem icon={DownloadCloud} label="DOWNLOADS" href="#" external iconColor="text-[#2ec7ff]" />
 
-          {/* Termos e Condições */}
-          <button
-            onClick={() => setTermosOpen(!termosOpen)}
-            className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#1a1f2e] rounded-xl transition-colors"
-          >
-            <span className="flex items-center justify-center w-8 h-8 rounded-lg text-gray-400">
-              <FileText size={18} />
-            </span>
+          <button onClick={() => setTermosOpen(!termosOpen)}
+            className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#1a1f2e] rounded-xl transition-colors">
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg text-gray-400"><FileText size={18} /></span>
             <span className="flex-1 text-white text-sm font-medium text-left">TERMOS E CONDIÇÕES</span>
-            <ChevronDown
-              size={13}
-              className={`text-gray-500 transition-transform duration-200 ${termosOpen ? 'rotate-180' : ''}`}
-            />
+            <ChevronDown size={13} className={`text-gray-500 transition-transform duration-200 ${termosOpen ? 'rotate-180' : ''}`} />
           </button>
 
           {termosOpen && (
             <div className="mx-2 rounded-xl overflow-hidden border border-[#2a3142] bg-[#0d1117]">
               <div className="flex border-b border-[#2a3142]">
-                <button
-                  onClick={() => setTermosTab('plataforma')}
-                  className={`flex-1 py-2.5 text-xs font-semibold transition-colors ${
-                    termosTab === 'plataforma' ? 'text-[#2ec7ff] border-b-2 border-[#2ec7ff]' : 'text-gray-500'
-                  }`}
-                >
+                <button onClick={() => setTermosTab('plataforma')}
+                  className={`flex-1 py-2.5 text-xs font-semibold transition-colors ${termosTab === 'plataforma' ? 'text-[#2ec7ff] border-b-2 border-[#2ec7ff]' : 'text-gray-500'}`}>
                   NEXORA FOREX
                 </button>
-                <button
-                  onClick={() => setTermosTab('deriv')}
-                  className={`flex-1 py-2.5 text-xs font-semibold transition-colors ${
-                    termosTab === 'deriv' ? 'text-[#2ec7ff] border-b-2 border-[#2ec7ff]' : 'text-gray-500'
-                  }`}
-                >
+                <button onClick={() => setTermosTab('deriv')}
+                  className={`flex-1 py-2.5 text-xs font-semibold transition-colors ${termosTab === 'deriv' ? 'text-[#2ec7ff] border-b-2 border-[#2ec7ff]' : 'text-gray-500'}`}>
                   DERIV
                 </button>
               </div>
-
               {termosTab === 'plataforma' ? (
                 <div className="p-4 max-h-64 overflow-y-auto">
-                  <pre className="text-gray-400 text-xs leading-relaxed whitespace-pre-wrap font-sans">
-                    {TERMOS_PLATAFORMA}
-                  </pre>
+                  <pre className="text-gray-400 text-xs leading-relaxed whitespace-pre-wrap font-sans">{TERMOS_PLATAFORMA}</pre>
                 </div>
               ) : (
                 <div className="p-4 space-y-3">
-                  <p className="text-gray-400 text-xs leading-relaxed">
-                    Os termos e condições da Deriv estão disponíveis no site oficial da corretora.
-                  </p>
-                  <a
-                    href="https://deriv.com/tnc/general-terms.pdf"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 text-[#2ec7ff] text-xs font-medium hover:underline"
-                  >
-                    <ExternalLink size={12} />
-                    Termos Gerais — deriv.com
+                  <p className="text-gray-400 text-xs leading-relaxed">Os termos e condições da Deriv estão disponíveis no site oficial da corretora.</p>
+                  <a href="https://deriv.com/tnc/general-terms.pdf" target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-2 text-[#2ec7ff] text-xs font-medium hover:underline">
+                    <ExternalLink size={12} /> Termos Gerais — deriv.com
                   </a>
-                  <a
-                    href="https://deriv.com/tnc/funds-security.pdf"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 text-[#2ec7ff] text-xs font-medium hover:underline"
-                  >
-                    <ExternalLink size={12} />
-                    Segurança de Fundos — deriv.com
+                  <a href="https://deriv.com/tnc/funds-security.pdf" target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-2 text-[#2ec7ff] text-xs font-medium hover:underline">
+                    <ExternalLink size={12} /> Segurança de Fundos — deriv.com
                   </a>
-                  <a
-                    href="https://deriv.com/tnc/risk-disclosure.pdf"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 text-[#2ec7ff] text-xs font-medium hover:underline"
-                  >
-                    <ExternalLink size={12} />
-                    Divulgação de Risco — deriv.com
+                  <a href="https://deriv.com/tnc/risk-disclosure.pdf" target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-2 text-[#2ec7ff] text-xs font-medium hover:underline">
+                    <ExternalLink size={12} /> Divulgação de Risco — deriv.com
                   </a>
                 </div>
               )}
@@ -624,7 +465,6 @@ export default function MenuPage() {
 
         <div className="h-px bg-[#1a1f2e] mb-4" />
 
-        {/* Profile */}
         <div className="flex items-center gap-3 px-4 py-3 bg-[#0d1117] rounded-xl mb-4">
           <div className="w-10 h-10 rounded-full bg-[#1a1f2e] flex items-center justify-center">
             <User size={18} className="text-gray-400" />
@@ -639,8 +479,6 @@ export default function MenuPage() {
           </div>
         </div>
 
-        {/* Admin Panel — navega para /admin (página fullscreen
-            dedicada, com a sua própria verificação de isAdmin) */}
         {isAdmin && (
           <>
             <div className="h-px bg-[#1a1f2e] mb-4" />
@@ -649,13 +487,9 @@ export default function MenuPage() {
               <span className="text-xs font-semibold tracking-wide">ADMIN</span>
             </div>
             <div className="space-y-1 mb-4">
-              <button
-                onClick={() => setView('admin')}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#1a1f2e] rounded-xl transition-colors"
-              >
-                <span className="flex items-center justify-center w-8 h-8 rounded-lg text-[#f59e0b]">
-                  <BarChart2 size={18} />
-                </span>
+              <button onClick={() => setView('admin')}
+                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#1a1f2e] rounded-xl transition-colors">
+                <span className="flex items-center justify-center w-8 h-8 rounded-lg text-[#f59e0b]"><BarChart2 size={18} /></span>
                 <span className="flex-1 text-white text-sm font-medium text-left">DASHBOARD ADMIN</span>
                 <ChevronRight size={15} className="text-gray-500" />
               </button>
@@ -665,15 +499,10 @@ export default function MenuPage() {
 
         <div className="h-px bg-[#1a1f2e] mb-4" />
 
-        {/* Logout */}
         <div className="space-y-1">
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#ef4444]/10 rounded-xl transition-colors group"
-          >
-            <span className="flex items-center justify-center w-8 h-8 rounded-lg text-[#ef4444]">
-              <LogOut size={18} />
-            </span>
+          <button onClick={handleLogout}
+            className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[#ef4444]/10 rounded-xl transition-colors group">
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg text-[#ef4444]"><LogOut size={18} /></span>
             <span className="text-[#ef4444] text-sm font-medium">SAIR</span>
           </button>
         </div>
