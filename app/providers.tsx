@@ -1,45 +1,25 @@
 'use client'
-
-import { ReactNode, useMemo } from 'react'
+import { ReactNode } from 'react'
 import dynamic from 'next/dynamic'
-import { AuthProvider, useAuth } from '@/lib/auth-context'
+import { AuthProvider } from '@/lib/auth-context'
 import { TradingProvider } from '@/lib/trading-context'
 import { LoaderProvider } from '@/components/loader'
 
-// Carrega BotsProvider apenas no cliente — evita SSR de WebSocket
+// BotsProvider só no cliente — contém WebSocket
 const BotsProvider = dynamic(
   () => import('@/lib/bots-context').then(m => ({ default: m.BotsProvider })),
   { ssr: false }
 )
 
-function TradingProviderWithAuth({ children }: { children: ReactNode }) {
-  const { isLoading, currentAccount } = useAuth()
-  const { oauthToken, accountId } = useMemo(() => {
-    if (isLoading || typeof window === 'undefined') {
-      return { oauthToken: '', accountId: '' }
-    }
-    return {
-      oauthToken: localStorage.getItem('token') || '',
-      accountId:  currentAccount?.account_id || localStorage.getItem('currentAccountId') || '',
-    }
-  }, [isLoading, currentAccount?.account_id])
-
-  return (
-    <TradingProvider oauthToken={oauthToken} accountId={accountId}>
-      {children}
-    </TradingProvider>
-  )
-}
-
 export function Providers({ children }: { children: ReactNode }) {
   return (
     <AuthProvider>
       <LoaderProvider>
-        <TradingProviderWithAuth>
+        <TradingProvider>
           <BotsProvider>
             {children}
           </BotsProvider>
-        </TradingProviderWithAuth>
+        </TradingProvider>
       </LoaderProvider>
     </AuthProvider>
   )
