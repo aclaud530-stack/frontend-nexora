@@ -2,8 +2,13 @@
 
 // ============================================================
 // NEXORA FOREX — WebSocket Hook
-// Fluxo: utilizador lista catálogo → escolhe bot → configura
-//        parâmetros → start_catalog_bot → backend executa
+//
+// CORRECÇÕES:
+//   ✅ handleMessage inclui 'send' nas dependências do useCallback
+//   ✅ Handlers 'balance' e 'tick' adicionados para bridge com
+//      TradingContext (via callbacks onBalance/onTick)
+//   ✅ 'authenticated' tratado antes do default para não cair
+//      no handler de bot events
 // ============================================================
 
 import { useEffect, useRef, useCallback, useState } from 'react'
@@ -13,7 +18,6 @@ import {
   FrontendMsgType, BackendMsgType,
 } from './nexora.types'
 
-// ─── Tipo do catálogo (espelha CatalogBot do backend) ─────────
 export interface CatalogBot {
   id:            string
   name:          string
@@ -29,30 +33,18 @@ export interface CatalogBot {
 export type WsStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 
 interface NexoraWsCallbacks {
-  // Catálogo de bots (disponíveis para o utilizador escolher)
-  onCatalogLoaded?:    (bots: CatalogBot[]) => void
-  // Bots da sessão do utilizador (em execução)
+  onCatalogLoaded?:     (bots: CatalogBot[]) => void
   onSessionBotsLoaded?: (bots: BotSummary[]) => void
-  // Bot criado/iniciado a partir do catálogo
-  onBotStarted?:       (bot: BotState & { catalogBotId?: string }) => void
-  // Eventos do BotManager (started, stopped, paused, trade_opened, etc.)
-  onBotEvent?:         (event: BotEvent) => void
-  // Logs de um bot
-  onBotLogs?:          (botId: string, logs: BotLogEntry[]) => void
-  // Erros
-  onError?:            (msg: string) => void
-  // Autenticação falhou de forma definitiva (token inválido/expirado
-  // na Deriv, ex: erro AUTH_FAILED do backend). Diferente de onError:
-  // sinaliza que a app deve parar de tentar reautenticar automaticamente
-  // com as mesmas credenciais — sem isto, cada reconexão WS volta a
-  // tentar o mesmo token inválido, martelando o backend num loop.
-  onAuthFailed?:       () => void
-  // Token OAuth da Deriv (de useAuth/localStorage) e conta activa —
-  // necessários para autenticar a sessão no backend Nexora. Sem isto,
-  // o backend nunca chama session.authenticated = true e qualquer
-  // acção de bot falha com "Not authenticated".
-  token?:              string | null
-  accountId?:          string | null
+  onBotStarted?:        (bot: BotState & { catalogBotId?: string }) => void
+  onBotEvent?:          (event: BotEvent) => void
+  onBotLogs?:           (botId: string, logs: BotLogEntry[]) => void
+  onError?:             (msg: string) => void
+  onAuthFailed?:        () => void
+  // Bridge para TradingContext — dados de mercado do backend
+  onBalance?:           (balance: number, currency: string) => void
+  onTick?:              (quote: number) => void
+  token?:               string | null
+  accountId?:           string | null
 }
 
 export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
@@ -65,43 +57,27 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
   const cbRef      = useRef(callbacks)
   cbRef.current    = callbacks
 
-  // Refs para token/accountId — sempre actualizadas, evitam reabrir
-  // a ligação WS a cada render quando estes valores mudam.
-  const tokenRef     = useRef(callbacks.token ?? null)
-  const accountIdRef = useRef(callbacks.accountId ?? null)
-  const lastAuthSentRef = useRef<string>('')
-  // Credenciais que já falharam autenticação no backend — nunca
-  // reenviadas automaticamente, mesmo que o WS reconecte.
-  const failedAuthKeyRef = useRef<string>('')
-  // Timestamp da última mensagem recebida (qualquer tipo, incluindo
-  // pong) — usado pelo watchdog para detectar ligações "zombie":
-  // readyState continua OPEN mas o socket já não responde de facto
-  // (comum em mobile após standby longo / mudança de rede).
-  const lastMessageAtRef = useRef<number>(Date.now())
-  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  tokenRef.current     = callbacks.token ?? null
-  accountIdRef.current = callbacks.accountId ?? null
+  const tokenRef               = useRef(callbacks.token ?? null)
+  const accountIdRef           = useRef(callbacks.accountId ?? null)
+  const lastAuthSentRef        = useRef<string>('')
+  const failedAuthKeyRef       = useRef<string>('')
+  const lastMessageAtRef       = useRef<number>(Date.now())
+  const watchdogRef            = useRef<ReturnType<typeof setInterval> | null>(null)
+  tokenRef.current             = callbacks.token ?? null
+  accountIdRef.current         = callbacks.accountId ?? null
 
   const [wsStatus, setWsStatus] = useState<WsStatus>('disconnected')
 
-  // ── Enviar mensagem ──────────────────────────────────────────
-  // Formato: { type, payload } — o server.ts lê data.type e data.payload
   const send = useCallback((type: string, payload: Record<string, unknown> = {}) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type, payload }))
     }
   }, [])
 
-  // ── Processar mensagem recebida do backend ────────────────────
+  // CORRECÇÃO: send adicionado às dependências
   const handleMessage = useCallback((raw: string) => {
     let msg: { type?: string; payload?: unknown } = {}
-    try {
-      msg = JSON.parse(raw)
-    } catch (e) {
-      console.error('[NexoraWS] JSON inválido:', e, raw)
-      return
-    }
-
+    try { msg = JSON.parse(raw) } catch { return }
     if (!msg?.type) return
 
     const payload = msg.payload ?? {}
@@ -109,108 +85,102 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
     try {
       switch (msg.type as string) {
 
-        // ── Catálogo de bots (resposta a list_bots) ───────────
         case 'bots_list':
           cbRef.current.onCatalogLoaded?.(payload as CatalogBot[])
           break
 
-        // ── Bots da sessão (resposta a list_session_bots) ─────
         case 'session_bots_list':
           cbRef.current.onSessionBotsLoaded?.(payload as BotSummary[])
           break
 
-        // ── Bot criado e iniciado (resposta a start_catalog_bot)
         case 'bot_created':
           cbRef.current.onBotStarted?.(payload as BotState & { catalogBotId?: string })
           break
 
-        // ── Confirmação de stop/pause/resume/delete ───────────
-        // Tratadas via bot_event (bot:stopped, bot:paused, bot:resumed)
-        // As confirmações explícitas abaixo são redundantes mas seguras
         case 'bot_stopped':
         case 'bot_paused':
         case 'bot_resumed':
         case 'bot_deleted':
-          // O bots-context trata via onBotEvent; aqui apenas log de debug
-          console.debug('[NexoraWS] confirmação:', msg.type, payload)
           break
 
-        // ── Logs de um bot ────────────────────────────────────
         case 'bot_logs': {
           const p = payload as { botId?: string; logs?: BotLogEntry[] }
           if (p.botId && p.logs) cbRef.current.onBotLogs?.(p.botId, p.logs)
           break
         }
 
-        // ── Eventos do BotManager (bot:started, bot:trade_closed, …)
-        // O server.ts emite o BotEventType como type, com
-        // payload = { botId, ...rest } aninhado em msg.payload.
+        // ── NOVO: dados de mercado do backend ────────────────
+        // O server.ts emite 'balance' e 'tick' como proxy da Deriv.
+        // Passamos para o TradingContext via bridge callbacks.
+        case 'balance': {
+          const p = payload as { balance?: number; currency?: string }
+          if (p.balance != null) cbRef.current.onBalance?.(p.balance, p.currency ?? 'USD')
+          break
+        }
+
+        case 'tick': {
+          const p = payload as { quote?: number }
+          if (p.quote != null) cbRef.current.onTick?.(p.quote)
+          break
+        }
+
+        // ── CORRECÇÃO: authenticated tratado explicitamente ──
+        // Evita cair no handler de bot:* ou no default sem tratamento
+        case 'authenticated':
+          // Pede catálogo e sessão após autenticação garantida
+          send('list_bots')
+          send('list_session_bots')
+          break
+
+        case 'deriv_disconnected':
+        case 'deriv_reconnected':
+          // Informativo — o backend trata reconexão automaticamente
+          break
+
+        case 'pong':
+          // Resposta ao nosso ping — nada a fazer
+          break
+
+        case 'error': {
+          const p = payload as Record<string, unknown>
+          const rootMsg = (msg as Record<string, unknown>)
+          const errMsg = typeof p?.message === 'string' ? p.message
+                       : typeof p?.error   === 'string' ? p.error
+                       : typeof payload    === 'string' ? payload
+                       : typeof rootMsg?.message === 'string' ? rootMsg.message
+                       : 'Erro desconhecido'
+          const code = typeof p?.code === 'string' ? p.code
+                     : typeof rootMsg?.code === 'string' ? rootMsg.code
+                     : undefined
+          if (code === 'AUTH_FAILED' || code === 'MISSING_TOKEN' || code === 'NO_ACCOUNTS' || code === 'OTP_FAILED') {
+            failedAuthKeyRef.current = `${tokenRef.current}:${accountIdRef.current}`
+            cbRef.current.onAuthFailed?.()
+          }
+          cbRef.current.onError?.(errMsg as string)
+          break
+        }
+
         default:
           if ((msg.type as string).startsWith('bot:')) {
             const nested = (payload ?? {}) as Record<string, unknown>
             const root   = (msg as Record<string, unknown>)
-            // Tolerante a ambos os formatos: aninhado em payload (formato
-            // atual do backend) ou na raiz da mensagem (defensivo).
-            const botId = typeof nested.botId === 'string' ? nested.botId
-                        : typeof root.botId   === 'string' ? root.botId
-                        : ''
+            const botId  = typeof nested.botId === 'string' ? nested.botId
+                         : typeof root.botId   === 'string' ? root.botId : ''
             const evPayload = Object.keys(nested).length > 0 ? nested : root
             cbRef.current.onBotEvent?.({
               type:    msg.type as BotEventType,
               botId,
               payload: evPayload,
             })
-            break
+          } else {
+            console.debug('[NexoraWS] mensagem não tratada:', msg.type, payload)
           }
-
-          // ── Erro do servidor ──────────────────────────────
-          if (msg.type === 'error') {
-            const p = payload as Record<string, unknown>
-            const rootMsg = (msg as Record<string, unknown>)
-            const errMsg = typeof p?.message === 'string' ? p.message
-                         : typeof p?.error   === 'string' ? p.error
-                         : typeof payload    === 'string' ? payload
-                         // tolerância extra: caso o backend envie code/message
-                         // na raiz da mensagem em vez de aninhados em payload
-                         : typeof rootMsg?.message === 'string' ? rootMsg.message
-                         : typeof rootMsg?.error   === 'string' ? rootMsg.error
-                         : 'Erro desconhecido'
-
-            const code = typeof p?.code === 'string' ? p.code
-                       : typeof rootMsg?.code === 'string' ? rootMsg.code
-                       : undefined
-
-            // Token inválido/expirado: marca estas credenciais como
-            // falhadas para não as reenviar a cada reconexão, e avisa
-            // a app para levar o utilizador de volta ao login.
-            if (code === 'AUTH_FAILED' || code === 'MISSING_TOKEN' || code === 'NO_ACCOUNTS' || code === 'OTP_FAILED') {
-              failedAuthKeyRef.current = `${tokenRef.current}:${accountIdRef.current}`
-              cbRef.current.onAuthFailed?.()
-            }
-
-            cbRef.current.onError?.(errMsg as string)
-            break
-          }
-
-
-          // ── Confirmação de autenticação ───────────────────
-          // Sempre que a sessão fica autenticada, pedimos o catálogo
-          // outra vez como rede de segurança — cobre o caso em que o
-          // list_bots inicial (enviado no onopen, antes do auth) tenha
-          // chegado a uma instância/sessão ainda não autenticada.
-          if (msg.type === 'authenticated') {
-            send('list_bots')
-            break
-          }
-
-          console.debug('[NexoraWS] mensagem não tratada:', msg.type, payload)
       }
     } catch (e) {
       console.error('[NexoraWS] erro ao processar mensagem:', msg.type, e)
     }
-  }, [])
+  }, [send]) // ← CORRECÇÃO: send nas deps
 
-  // ── Conectar com backoff exponencial ─────────────────────────
   const connect = useCallback(() => {
     if (!mountedRef.current) return
     if (wsRef.current?.readyState === WebSocket.OPEN) return
@@ -223,38 +193,19 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
       if (!mountedRef.current) { ws.close(); return }
       attemptRef.current = 0
       setWsStatus('connected')
-      // Pede catálogo de bots imediatamente após ligar.
-      // list_bots é público no backend (não exige autenticação),
-      // por isso pode ser pedido logo aqui em segurança.
       ws.send(JSON.stringify({ type: 'list_bots', payload: {} }))
-      // Se já temos token/conta (ex: utilizador já tinha sessão Deriv
-      // activa antes desta ligação WS abrir), autentica imediatamente.
-      // Sem isto, qualquer acção de bot falha com "Not authenticated".
-      // Exceção: se estas credenciais já falharam autenticação antes,
-      // não tentamos de novo — evita martelar o backend num loop com
-      // um token sabidamente inválido/expirado a cada reconexão.
       if (tokenRef.current && accountIdRef.current) {
         const authKey = `${tokenRef.current}:${accountIdRef.current}`
         if (authKey !== failedAuthKeyRef.current) {
           lastAuthSentRef.current = authKey
-          ws.send(JSON.stringify({
-            type: 'auth',
-            payload: { token: tokenRef.current, accountId: accountIdRef.current },
-          }))
+          ws.send(JSON.stringify({ type: 'auth', payload: { token: tokenRef.current, accountId: accountIdRef.current } }))
         }
       }
-      // Keepalive 15s — mais frequente do que antes (25s) para
-      // detectar ligações mortas mais rápido sob carga.
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN)
           ws.send(JSON.stringify({ type: 'ping', payload: {} }))
       }, 15_000)
 
-      // Watchdog: se não chegar NENHUMA mensagem (nem pong) durante
-      // 40s seguidos, a ligação está "zombie" — o readyState reporta
-      // OPEN mas o socket já não está realmente vivo. Força o fecho
-      // para disparar o ciclo normal de reconexão em vez de ficar
-      // preso numa ligação morta indefinidamente.
       lastMessageAtRef.current = Date.now()
       if (watchdogRef.current) clearInterval(watchdogRef.current)
       watchdogRef.current = setInterval(() => {
@@ -299,33 +250,19 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
     }
   }, [connect])
 
-  // ── Reconexão imediata ao voltar a ficar visível/online ──────
-  // Browsers (especialmente mobile) suspendem ou fecham ligações WS
-  // quando a aba é minimizada/em background. Sem isto, ao voltar à
-  // app o utilizador ficaria à espera do backoff exponencial (até
-  // 30s) antes de reconectar. Aqui forçamos reconexão imediata e
-  // resetamos o backoff, para a app "voltar rápido" como esperado.
   useEffect(() => {
     if (typeof document === 'undefined') return
-
     const tryFastReconnect = () => {
       if (!mountedRef.current) return
       if (wsRef.current?.readyState === WebSocket.OPEN) return
-      // Reset do backoff — não queremos herdar um delay longo de
-      // tentativas anteriores só porque a aba esteve em background.
       attemptRef.current = 0
       if (reconnRef.current) { clearTimeout(reconnRef.current); reconnRef.current = null }
       connect()
     }
-
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') tryFastReconnect()
-    }
-
+    const onVisibility = () => { if (document.visibilityState === 'visible') tryFastReconnect() }
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('online', tryFastReconnect)
     window.addEventListener('focus', tryFastReconnect)
-
     return () => {
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('online', tryFastReconnect)
@@ -333,68 +270,35 @@ export function useNexoraWs(callbacks: NexoraWsCallbacks = {}) {
     }
   }, [connect])
 
-  // ── (Re)autenticar quando token/accountId chegam ou mudam ────
-  // Cobre dois casos que o onopen por si só não cobre:
-  //   1) login termina DEPOIS da ligação WS já estar aberta
-  //   2) utilizador troca de conta (accountId muda) com o socket já ligado
-  // Sem isto, a sessão fica para sempre "Not authenticated" se o
-  // token só chegar depois do socket abrir.
   useEffect(() => {
     const token     = callbacks.token ?? null
     const accountId = callbacks.accountId ?? null
     if (!token || !accountId) return
-
     const authKey = `${token}:${accountId}`
-    if (lastAuthSentRef.current === authKey) return // já autenticado com estas credenciais
-    if (failedAuthKeyRef.current === authKey) return // já sabemos que estas credenciais falham
-
+    if (lastAuthSentRef.current === authKey) return
+    if (failedAuthKeyRef.current === authKey) return
     const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return // o onopen trata deste caso
-
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
     lastAuthSentRef.current = authKey
     ws.send(JSON.stringify({ type: 'auth', payload: { token, accountId } }))
   }, [callbacks.token, callbacks.accountId])
 
-  // ── API pública ───────────────────────────────────────────────
   return {
     wsStatus,
-
-    // Catálogo — o utilizador só lê e escolhe
-    listCatalogBots:  useCallback(() => send('list_bots'),                    [send]),
-    listSessionBots:  useCallback(() => send('list_session_bots'),            [send]),
-
-    // Iniciar bot do catálogo com parâmetros do utilizador
-    // catalogBotId: id do bot no catálogo
-    // sessionName:  nome opcional para esta instância
-    // configOverride: parâmetros que o utilizador pode ajustar
-    startCatalogBot: useCallback((
-      catalogBotId: string,
-      sessionName?: string,
-      configOverride?: Partial<BotConfig>,
-    ) => send('start_catalog_bot', { catalogBotId, sessionName, configOverride: configOverride ?? {} }),
-    [send]),
-
-    // Controlo dos bots da sessão
-    stopBot:    useCallback((botId: string) => send('stop_bot',    { botId }), [send]),
-    pauseBot:   useCallback((botId: string) => send('pause_bot',   { botId }), [send]),
-    resumeBot:  useCallback((botId: string) => send('resume_bot',  { botId }), [send]),
-    deleteBot:  useCallback((botId: string) => send('delete_bot',  { botId }), [send]),
-    getBotLogs: useCallback((botId: string, limit = 100) =>
-                  send('get_bot_logs', { botId, limit }), [send]),
-
-    // Admin — gerir catálogo via WS
+    listCatalogBots:  useCallback(() => send('list_bots'),         [send]),
+    listSessionBots:  useCallback(() => send('list_session_bots'), [send]),
+    startCatalogBot:  useCallback((catalogBotId: string, sessionName?: string, configOverride?: Partial<BotConfig>) =>
+                        send('start_catalog_bot', { catalogBotId, sessionName, configOverride: configOverride ?? {} }), [send]),
+    stopBot:          useCallback((botId: string) => send('stop_bot',    { botId }), [send]),
+    pauseBot:         useCallback((botId: string) => send('pause_bot',   { botId }), [send]),
+    resumeBot:        useCallback((botId: string) => send('resume_bot',  { botId }), [send]),
+    deleteBot:        useCallback((botId: string) => send('delete_bot',  { botId }), [send]),
+    getBotLogs:       useCallback((botId: string, limit = 100) => send('get_bot_logs', { botId, limit }), [send]),
     adminAddCatalogBot: useCallback((dto: {
-      name: string;
-      description: string;
-      strategy: BotStrategyType;
-      defaultConfig: BotConfig;
-      tags?: string[];
-      isActive?: boolean;
+      name: string; description: string; strategy: BotStrategyType;
+      defaultConfig: BotConfig; tags?: string[]; isActive?: boolean;
     }) => send('admin_add_catalog_bot', dto as Record<string, unknown>), [send]),
-
-    adminRemoveCatalogBot: useCallback((id: string) =>
-      send('admin_remove_catalog_bot', { id }), [send]),
-
+    adminRemoveCatalogBot: useCallback((id: string) => send('admin_remove_catalog_bot', { id }), [send]),
     adminUpdateCatalogBot: useCallback((id: string, updates: Record<string, unknown>) =>
       send('admin_update_catalog_bot', { id, ...updates }), [send]),
   }
