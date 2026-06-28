@@ -20,7 +20,7 @@ import {
 } from './nexora.types'
 import { useNexoraWs, WsStatus, CatalogBot } from './use-nexora-ws'
 import { useAuth } from './auth-context'
-import { useTrading, Trade } from './contexto-de-negociação'
+import { useTrading, Trade } from './trading-context'
 
 export interface TradeRecord {
   id:            string
