@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useLoader } from '@/components/loader'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://banckend-production-14a1.up.railway.app'
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://banckend-nexora.onrender.com'
 
 export default function LoginPage() {
   const router = useRouter()
