@@ -26,7 +26,16 @@ export default function LoginPage() {
     setIsLoading(true)
     show('A redirecionar para Deriv...')
     try {
-      const res = await fetch(`${API_URL}/api/auth/login`)
+      // CORREÇÃO CRÍTICA: credentials: 'include' é obrigatório aqui.
+      // Sem isto, o navegador NÃO grava o cookie Set-Cookie devolvido
+      // pelo backend nesta resposta, porque é um fetch cross-origin
+      // (Vercel -> Render). Sem credentials: 'include', o cookie PKCE
+      // nunca chega a existir no browser, e o callback no backend
+      // falha sempre com "Cookie PKCE não encontrado" — independente
+      // de SameSite/Secure estarem corretos no backend.
+      const res = await fetch(`${API_URL}/api/auth/login`, {
+        credentials: 'include',
+      })
       const { authUrl } = await res.json()
       window.location.href = authUrl
     } catch (err) {
@@ -38,7 +47,10 @@ export default function LoginPage() {
   const handleRegister = async () => {
     show('A redirecionar para registo...')
     try {
-      const res = await fetch(`${API_URL}/api/auth/login?prompt=registration`)
+      // Mesma correção: credentials: 'include' necessário aqui também.
+      const res = await fetch(`${API_URL}/api/auth/login?prompt=registration`, {
+        credentials: 'include',
+      })
       const { authUrl } = await res.json()
       window.location.href = authUrl
     } catch (err) {
